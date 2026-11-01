@@ -34,7 +34,7 @@ Production build (hashed assets + SRI + minified, optionally obfuscated):
 ```bash
 npm run build                 # → dist/   (cd dist && node start.mjs)
 npm run obfuscate             # protected client bundle
-npm test                      # 52 unit, integration, MCP, hooks, edge + build tests
+npm test                      # 58 unit, integration, DOM, MCP, hooks, edge + build tests
 npm run smoke                 # 18 end-to-end checks against a live server
 ```
 
@@ -222,7 +222,7 @@ native/ptyhelper.c        tiny termios PTY bridge
 deploy/                   netlify.toml + vercel.json templates (edge proxy)
 scripts/                  build (hash+SRI+obfuscate), smoke, cloudflare deploy, edge config
 docs/PARITY.md            Claude Code parity scorecard (94 % weighted)
-tests/                    provider, unit, client (ANSI), MCP, hooks, edge worker, build — 52 tests
+tests/                    provider, unit, client (ANSI), DOM boot, MCP, hooks, edge, build — 58 tests
 ```
 
 ## Licence

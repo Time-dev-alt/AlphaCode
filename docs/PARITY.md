@@ -5,7 +5,7 @@ the scorecard: what matches, what is deliberately different, and what is still
 missing. Scores are per capability *surface*, not per line of code, and every
 "full" row below is exercised by `npm test` and/or `npm run smoke`.
 
-Weighted result: **94 %** (last verified with 52 unit/integration tests and
+Weighted result: **94 %** (last verified with 58 unit/integration/DOM tests and
 18 end-to-end smoke checks).
 
 | # | Capability surface | Weight | Score | Evidence |

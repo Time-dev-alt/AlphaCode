@@ -197,14 +197,47 @@ export class Store {
   }
   async clearThread(id) {
     for (const m of await this.messages(id)) await this.backend.del('messages', m.id);
+    this.seq?.delete(id);
+    this.seqPending?.delete(id);
   }
+  /** Seed the per-thread counter exactly once, even under concurrent writes. */
+  async ensureSeq(threadId) {
+    this.seq = this.seq || new Map();
+    this.seqPending = this.seqPending || new Map();
+    if (this.seq.has(threadId)) return;
+    if (!this.seqPending.has(threadId)) {
+      this.seqPending.set(
+        threadId,
+        (async () => {
+          const existing = await this.messages(threadId);
+          this.seq.set(threadId, existing.reduce((max, m) => Math.max(max, m.seq || 0), 0));
+        })(),
+      );
+    }
+    await this.seqPending.get(threadId);
+  }
+
   async messages(threadId) {
     const list = (await this.backend.all('messages')).filter((m) => m.threadId === threadId);
-    return list.sort((a, b) => a.seq - b.seq);
+    // `seq` is the source of truth; `createdAt` and `id` only break ties, so a
+    // duplicated sequence number can never reshuffle the conversation.
+    return list.sort((a, b) => (a.seq || 0) - (b.seq || 0) || (a.createdAt || 0) - (b.createdAt || 0) || String(a.id).localeCompare(String(b.id)));
   }
+
+  /**
+   * Append a message.
+   *
+   * The agent writes several messages in parallel (assistant text + tool results
+   * land in the same tick), so "read the last seq, add one" is a race that hands
+   * two messages the same number — which is how a transcript ends up with the
+   * user's question below the answer. The counter below is per-thread and lives
+   * in memory for the session, seeded from storage on first use.
+   */
   async addMessage(threadId, role, content, meta = {}) {
-    const existing = await this.messages(threadId);
-    const msg = { id: uid('m_'), threadId, role, content, meta, seq: (existing.at(-1)?.seq || 0) + 1, createdAt: Date.now() };
+    await this.ensureSeq(threadId);
+    const next = (this.seq.get(threadId) || 0) + 1;
+    this.seq.set(threadId, next);
+    const msg = { id: uid('m_'), threadId, role, content, meta, seq: next, createdAt: Date.now() };
     await this.backend.put('messages', msg.id, msg);
     return msg;
   }

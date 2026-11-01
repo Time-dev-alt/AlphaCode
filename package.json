@@ -1,6 +1,6 @@
 {
   "name": "alphacode",
-  "version": "4.0.0",
+  "version": "4.1.0",
   "private": true,
   "type": "module",
   "description": "AlphaCode — an AI app builder and coding agent that runs entirely in your browser: real Node + npm, CPython, a shell, SQLite, MCP and deploys, all in the tab.",
@@ -34,6 +34,9 @@
     "wrangler": "^4.156.0"
   },
   "dependencies": {
+    "@fontsource-variable/geist": "^5.3.0",
+    "@fontsource-variable/geist-mono": "^5.3.0",
+    "@fontsource/instrument-serif": "^5.3.0",
     "buffer": "^6.0.3",
     "esbuild": "^0.28.2",
     "fflate": "^0.8.2",

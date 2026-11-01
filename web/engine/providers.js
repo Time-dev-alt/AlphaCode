@@ -372,15 +372,111 @@ export async function demoCompletion({ messages = [], tools = [], onEvent = () =
 
 const DEMO_PAGE = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Built by AlphaCode</title><link rel="stylesheet" href="style.css"></head>
-<body><main><h1>Ship something today</h1><p>A page the agent wrote, entirely in your browser.</p>
-<section><article><h2>No server</h2><p>Files live in OPFS, the agent runs in this tab.</p></article>
-<article><h2>Your accounts</h2><p>Deploys go to your Cloudflare, Vercel or Netlify.</p></article></section>
-<button onclick="document.body.classList.toggle('alt')">Toggle theme</button></main></body></html>`;
+<title>Roam — coffee, delivered</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<header class="nav">
+  <a class="brand" href="#"><span class="mark"></span>Roam</a>
+  <nav><a href="#beans">Beans</a><a href="#how">How it works</a><a href="#plans">Plans</a></nav>
+  <a class="btn ghost" href="#plans">Get started</a>
+</header>
 
-const DEMO_CSS = `:root{--bg:#0b0d12;--fg:#eef1f7;--accent:#ff8a3d}
-*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--fg);font:16px/1.6 system-ui,sans-serif}
-main{max-width:760px;padding:48px}h1{font-size:clamp(32px,6vw,56px);margin:0 0 12px;background:linear-gradient(100deg,var(--accent),#e2566a);-webkit-background-clip:text;background-clip:text;color:transparent}
-section{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin:32px 0}
-article{border:1px solid #232838;border-radius:14px;padding:18px}button{background:var(--accent);border:0;border-radius:10px;padding:10px 16px;font-weight:600;cursor:pointer}
-body.alt{--bg:#f7f6f3;--fg:#17181c}`;
+<main>
+  <section class="hero">
+    <p class="eyebrow">Fresh roasted · shipped weekly</p>
+    <h1>Coffee that tastes like<br><em>somewhere else.</em></h1>
+    <p class="lede">Three single-origin roasts a month, chosen by people who obsess over this sort of thing. Roasted Tuesday, at your door Friday.</p>
+    <div class="cta"><a class="btn" href="#plans">Start with a trial box</a><a class="link" href="#how">See how it works</a></div>
+    <div class="proof"><span>4.9 / 5</span><span>2,400+ subscribers</span><span>Cancel anytime</span></div>
+  </section>
+
+  <section class="beans" id="beans">
+    <article><span class="swatch s1"></span><h2>Ethiopia Guji</h2><p>Jasmine, peach, bergamot. Bright and floral.</p></article>
+    <article><span class="swatch s2"></span><h2>Colombia Huila</h2><p>Red apple, panela, cocoa nib. Sweet and round.</p></article>
+    <article><span class="swatch s3"></span><h2>Sumatra Gayo</h2><p>Cedar, dark cherry, tobacco leaf. Deep and earthy.</p></article>
+  </section>
+
+  <section class="how" id="how">
+    <h2>Three steps, then it is coffee.</h2>
+    <ol>
+      <li><b>Tell us how you brew</b><span>Espresso, filter, or a bit of both.</span></li>
+      <li><b>We pick the roasts</b><span>Three origins, ground to order.</span></li>
+      <li><b>It arrives Friday</b><span>Roasted Tuesday, in the post Wednesday.</span></li>
+    </ol>
+  </section>
+
+  <section class="plans" id="plans">
+    <h2>Pick a plan</h2>
+    <div class="grid">
+      <article><h3>Small</h3><p class="price">$16<span>/mo</span></p><p>2 × 150 g bags</p><a class="btn ghost" href="#">Choose</a></article>
+      <article class="featured"><h3>Weekly</h3><p class="price">$27<span>/mo</span></p><p>3 × 250 g bags</p><a class="btn" href="#">Choose</a></article>
+      <article><h3>Café</h3><p class="price">$58<span>/mo</span></p><p>1 kg, your choice</p><a class="btn ghost" href="#">Choose</a></article>
+    </div>
+  </section>
+</main>
+
+<footer><span>Roam Coffee Co.</span><span>Built in a browser tab with AlphaCode.</span></footer>
+<script>document.querySelector('.brand').onclick = (e) => { e.preventDefault(); document.body.classList.toggle('alt'); };</script>
+</body></html>`;
+
+const DEMO_CSS = `:root{
+  --bg:#0d0a08; --panel:#151210; --fg:#f6efe7; --muted:#a79a8c;
+  --accent:#e8a24a; --accent-2:#c9663b; --line:rgba(255,255,255,.09);
+}
+body.alt{--bg:#fbf7f1;--panel:#fff;--fg:#1b1510;--muted:#6f6255;--line:rgba(24,16,8,.12)}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.65 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+body::before{content:"";position:fixed;inset:0 0 auto;height:70vh;background:
+  radial-gradient(60% 80% at 20% 0%,rgba(232,162,74,.18),transparent 65%),
+  radial-gradient(50% 70% at 85% 10%,rgba(201,102,59,.14),transparent 65%);pointer-events:none}
+.nav{position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:28px;padding:18px 32px;
+  backdrop-filter:blur(14px);background:color-mix(in srgb,var(--bg) 78%,transparent);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:9px;font-weight:700;letter-spacing:-.02em;color:inherit;text-decoration:none;font-size:17px}
+.mark{width:22px;height:22px;border-radius:7px;background:linear-gradient(140deg,var(--accent),var(--accent-2))}
+.nav nav{display:flex;gap:22px;margin-left:auto}
+.nav nav a{color:var(--muted);text-decoration:none;font-size:14px}
+.nav nav a:hover{color:var(--fg)}
+.btn{display:inline-flex;align-items:center;justify-content:center;padding:11px 18px;border-radius:11px;font-weight:600;font-size:14px;
+  background:linear-gradient(180deg,var(--accent),var(--accent-2));color:#1a1006;text-decoration:none;border:1px solid transparent;
+  box-shadow:0 8px 24px -12px rgba(232,162,74,.8)}
+.btn.ghost{background:transparent;color:var(--fg);border-color:var(--line);box-shadow:none}
+main{max-width:1080px;margin:0 auto;padding:0 32px}
+.hero{padding:96px 0 72px;max-width:760px}
+.eyebrow{margin:0 0 20px;font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent)}
+h1{margin:0 0 22px;font-size:clamp(40px,6.4vw,68px);line-height:1.02;letter-spacing:-.035em}
+h1 em{font-family:"Instrument Serif",Georgia,serif;font-style:italic;font-weight:400;
+  background:linear-gradient(100deg,var(--accent),var(--accent-2));-webkit-background-clip:text;background-clip:text;color:transparent}
+.lede{margin:0 0 32px;font-size:18px;color:var(--muted);max-width:56ch}
+.cta{display:flex;align-items:center;gap:20px;flex-wrap:wrap}
+.link{color:var(--muted);text-decoration:none;font-size:14px;border-bottom:1px solid var(--line);padding-bottom:2px}
+.link:hover{color:var(--fg)}
+.proof{display:flex;gap:22px;margin-top:44px;font-size:13px;color:var(--muted);flex-wrap:wrap}
+.proof span{display:flex;align-items:center;gap:8px}
+.proof span::before{content:"";width:5px;height:5px;border-radius:50%;background:var(--accent)}
+.beans{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:16px;padding:8px 0 72px}
+.beans article{padding:22px;border:1px solid var(--line);border-radius:18px;background:var(--panel)}
+.swatch{display:block;height:96px;border-radius:12px;margin-bottom:16px}
+.s1{background:linear-gradient(140deg,#f3d9a4,#c98f4a)}
+.s2{background:linear-gradient(140deg,#d98d63,#7e3f2a)}
+.s3{background:linear-gradient(140deg,#8d7f6a,#2f2a25)}
+.beans h2{margin:0 0 6px;font-size:17px;letter-spacing:-.01em}
+.beans p{margin:0;font-size:14px;color:var(--muted)}
+.how{padding:56px 0;border-top:1px solid var(--line)}
+.how h2{font-size:28px;letter-spacing:-.02em;margin:0 0 28px}
+.how ol{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:22px;list-style:none;padding:0;margin:0;counter-reset:step}
+.how li{border-left:1px solid var(--line);padding-left:18px}
+.how li::before{counter-increment:step;content:"0" counter(step);display:block;font-size:12px;color:var(--accent);margin-bottom:8px;letter-spacing:.1em}
+.how b{display:block;font-size:16px;margin-bottom:4px}
+.how span{font-size:14px;color:var(--muted)}
+.plans{padding:56px 0 80px;border-top:1px solid var(--line)}
+.plans h2{font-size:28px;letter-spacing:-.02em;margin:0 0 26px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px}
+.grid article{padding:24px;border:1px solid var(--line);border-radius:18px;background:var(--panel);display:flex;flex-direction:column;gap:6px}
+.grid article.featured{border-color:color-mix(in srgb,var(--accent) 55%,transparent);box-shadow:0 24px 60px -30px rgba(232,162,74,.5)}
+.grid h3{margin:0;font-size:13px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.price{margin:6px 0;font-size:38px;letter-spacing:-.03em}
+.price span{font-size:14px;color:var(--muted);letter-spacing:0}
+.grid p{margin:0;font-size:14px;color:var(--muted)}
+.grid .btn{margin-top:16px}
+footer{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:26px 32px;border-top:1px solid var(--line);font-size:13px;color:var(--muted)}
+@media(max-width:640px){.nav nav{display:none}.hero{padding:56px 0 40px}main{padding:0 20px}footer{padding:22px 20px}}`;

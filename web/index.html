@@ -1,107 +1,141 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>AlphaCode — describe it, watch it build</title>
 <meta name="description" content="An AI app builder and coding agent that runs entirely in your browser. Real files, real npm, real SQLite, real deploys — nothing leaves the tab.">
-<meta name="theme-color" content="#08090d" media="(prefers-color-scheme: dark)">
-<meta name="theme-color" content="#f7f6f3" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0a0b0d" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="/assets/fonts/geist.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/assets/app.css">
 </head>
 <body>
-<div class="app" id="app" data-layout="build">
-  <!-- ───────────────────────────── top bar ───────────────────────────── -->
+<a class="skip" href="#prompt">Skip to the prompt</a>
+
+<div class="app" id="app" data-layout="build" data-pane="chat" data-mobile-pane="chat">
+  <!-- ───────────────────────────────── top bar ───────────────────────────────── -->
   <header class="topbar">
-    <button class="icon-btn only-mobile" id="btn-menu" aria-label="Menu" data-icon="menu"></button>
-    <a class="brand" href="/" data-icon="logo" aria-label="AlphaCode"></a>
+    <button class="icon-btn only-mobile" id="btn-menu" aria-label="Open menu" data-icon="menu" data-icon-size="18"></button>
+
+    <a class="brand" href="/" aria-label="AlphaCode home">
+      <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 16.5 12 6.5l5.5 10"/></svg></span>
+      <span class="brand-name">AlphaCode</span>
+    </a>
 
     <div class="switch" id="layout-switch" role="tablist" aria-label="Workspace mode">
-      <button class="switch-btn active" data-layout="build" role="tab" aria-selected="true"><span data-icon="wand"></span>Build</button>
-      <button class="switch-btn" data-layout="code" role="tab" aria-selected="false"><span data-icon="terminal"></span>Code</button>
+      <span class="switch-thumb" aria-hidden="true"></span>
+      <button class="switch-btn active" data-layout="build" role="tab" aria-selected="true" title="Build — describe it, watch it appear (⌘⇧1)"><span data-icon="wand" data-icon-size="13"></span>Build</button>
+      <button class="switch-btn" data-layout="code" role="tab" aria-selected="false" title="Code — files, terminal, database (⌘⇧2)"><span data-icon="terminal" data-icon-size="13"></span>Code</button>
     </div>
 
-    <div class="project-pill" id="project-pill" title="Current project">
-      <span data-icon="folder"></span><span id="project-name">My first app</span>
-      <button class="icon-btn xs" id="btn-rename-project" title="Rename" data-icon="pencil"></button>
+    <div class="project-chip" id="project-pill" title="Current project">
+      <span class="project-dot" aria-hidden="true"></span>
+      <span id="project-name">My first app</span>
+      <button class="icon-btn xs ghost" id="btn-rename-project" title="Rename project" aria-label="Rename project" data-icon="pencil" data-icon-size="12"></button>
     </div>
 
     <div class="grow"></div>
 
-    <div class="chips">
-      <span class="chip" id="chip-model" title="Model in use"><span data-icon="spark"></span><span id="chip-model-txt">kilo/auto</span></span>
-      <span class="chip ghost" id="chip-runtime" title="All runtimes execute in this tab"><span data-icon="cpu"></span><span id="chip-runtime-txt">in-tab</span></span>
-      <span class="chip ghost" id="chip-github" title="GitHub" hidden><span data-icon="github"></span><span id="chip-github-txt">—</span></span>
+    <button class="status-pill" id="status-pill" title="Runtime status" aria-haspopup="dialog">
+      <span class="dot ok" id="status-dot"></span>
+      <span id="status-text">ready</span>
+      <span class="status-sep" aria-hidden="true"></span>
+      <span class="status-hint" id="status-hint">in-tab</span>
+    </button>
+
+    <div class="topbar-actions">
+      <button class="icon-btn" id="btn-history" title="Version history (⌘⇧H)" aria-label="Version history" data-icon="history" data-icon-size="17"></button>
+      <button class="icon-btn" id="btn-theme" title="Switch theme (⌘⇧L)" aria-label="Switch theme" data-icon="moon" data-icon-size="17"></button>
+      <button class="icon-btn" id="btn-command" title="Command menu (⌘K)" aria-label="Command menu" data-icon="search" data-icon-size="17"></button>
+      <button class="icon-btn" id="btn-settings" title="Settings" aria-label="Settings" data-icon="sliders" data-icon-size="17"></button>
+      <button class="btn primary" id="btn-publish-top" data-icon="rocket" data-icon-size="14"><span>Publish</span></button>
     </div>
-    <span class="status"><span class="dot ok" id="status-dot"></span><span id="status-text">ready</span></span>
-    <button class="icon-btn" id="btn-history" title="Version history" data-icon="history"></button>
-    <button class="icon-btn" id="btn-settings" title="Settings" data-icon="gear"></button>
-    <button class="btn primary sm" id="btn-publish-top" data-icon="rocket">Publish</button>
+
+    <div class="runtime-panel" id="runtime-panel" role="dialog" hidden aria-label="Runtime status"></div>
   </header>
 
-  <!-- ───────────────────────────── sidebar ───────────────────────────── -->
+  <!-- ───────────────────────────────── sidebar ───────────────────────────────── -->
   <div class="scrim" id="scrim" hidden></div>
-  <aside class="sidebar" id="sidebar">
-    <div class="side-head">
-      <h2>Projects</h2>
-      <button class="icon-btn sm" id="btn-new-project" title="New project" data-icon="plus"></button>
+  <aside class="sidebar" id="sidebar" aria-label="Projects and sessions">
+    <div class="side-block">
+      <div class="side-label">
+        <span>Projects</span>
+        <button class="icon-btn xs ghost" id="btn-new-project" title="New project (⌘⇧N)" aria-label="New project" data-icon="plus" data-icon-size="13"></button>
+      </div>
+      <div class="side-list" id="project-list"></div>
+      <button class="side-action" id="btn-templates" data-icon="grid" data-icon-size="14">
+        <span>Templates</span><span class="kbd-hint">T</span>
+      </button>
     </div>
-    <div class="side-list" id="project-list"></div>
 
-    <button class="btn soft block" id="btn-templates" data-icon="grid">Start from a template</button>
-
-    <div class="side-head">
-      <h2>Sessions</h2>
-      <button class="icon-btn sm" id="btn-new-session" title="New session" data-icon="plus"></button>
+    <div class="side-block grow">
+      <div class="side-label">
+        <span>Sessions</span>
+        <button class="icon-btn xs ghost" id="btn-new-session" title="New session" aria-label="New session" data-icon="plus" data-icon-size="13"></button>
+      </div>
+      <div class="side-list" id="session-list"></div>
     </div>
-    <div class="side-list" id="session-list"></div>
 
     <div class="side-foot">
       <div class="storage">
-        <span class="mini" id="storage-note">Files stay in this browser.</span>
-        <button class="link" id="btn-export" data-icon="download">Export</button>
+        <span class="storage-mark" data-icon="shield" data-icon-size="13"></span>
+        <span id="storage-note">Files stay in this browser.</span>
+      </div>
+      <div class="side-foot-actions">
+        <button class="link" id="btn-export" data-icon="download" data-icon-size="13">Export</button>
+        <button class="link" id="btn-help" data-icon="help" data-icon-size="13">Shortcuts</button>
+      </div>
+      <div class="side-foot-actions only-mobile">
+        <button class="link" id="btn-history-m" data-icon="history" data-icon-size="13">History</button>
+        <button class="link" id="btn-theme-m" data-icon="moon" data-icon-size="13">Theme</button>
+        <button class="link" id="btn-settings-m" data-icon="sliders" data-icon-size="13">Settings</button>
       </div>
     </div>
   </aside>
 
-  <!-- ───────────────────────────── workspace ─────────────────────────── -->
+  <!-- ──────────────────────────────── workspace ──────────────────────────────── -->
   <main class="workspace" id="main">
-    <section class="chat-col">
-      <nav class="tabs" role="tablist">
-        <button class="tab active" data-view="chat" role="tab"><span data-icon="chat"></span>Chat</button>
-        <button class="tab code-only" data-view="files" role="tab"><span data-icon="file"></span>Files</button>
-        <button class="tab code-only" data-view="terminal" role="tab"><span data-icon="terminal"></span>Terminal</button>
-        <button class="tab code-only" data-view="db" role="tab"><span data-icon="database"></span>Database</button>
-        <button class="tab" data-view="deploy" role="tab"><span data-icon="rocket"></span>Deploy</button>
+    <!-- build column: conversation + tool views -->
+    <section class="work-col">
+      <nav class="tabs" role="tablist" aria-label="Workspace views">
+        <button class="tab active" data-view="chat" role="tab"><span data-icon="message" data-icon-size="14"></span><span>Chat</span></button>
+        <button class="tab" data-view="files" role="tab"><span data-icon="files" data-icon-size="14"></span><span>Files</span><span class="tab-count" id="tab-file-count"></span></button>
+        <button class="tab" data-view="terminal" role="tab"><span data-icon="terminal" data-icon-size="14"></span><span>Terminal</span></button>
+        <button class="tab" data-view="db" role="tab"><span data-icon="database" data-icon-size="14"></span><span>Data</span></button>
+        <button class="tab" data-view="deploy" role="tab"><span data-icon="rocket" data-icon-size="14"></span><span>Ship</span></button>
         <div class="grow"></div>
-        <button class="icon-btn sm" id="btn-preview" title="Rebuild preview" data-icon="refresh"></button>
+        <button class="icon-btn sm" id="btn-preview" title="Rebuild the preview (⌘R)" aria-label="Rebuild preview" data-icon="refresh" data-icon-size="14"></button>
       </nav>
 
       <!-- chat -->
       <section class="view active" id="view-chat">
         <div class="transcript" id="transcript" aria-live="polite"><div class="transcript-inner" id="transcript-inner"></div></div>
-        <div class="todo-box" id="todo-box" hidden></div>
-        <div class="composer-wrap">
-          <div class="mode-row">
-            <button class="pill" id="btn-mode" title="Permission mode (⇧Tab)">default</button>
-            <button class="pill" id="btn-model">kilo/auto</button>
-            <span class="hint" id="ctx-meter" title="Context usage">0%</span>
-            <div class="grow"></div>
-            <button class="pill danger" id="btn-stop" hidden data-icon="stop">Stop</button>
-          </div>
-          <div class="composer">
-            <textarea id="prompt" rows="1" placeholder="Describe the app you want — or ask for a change…"></textarea>
-            <div class="composer-actions">
-              <button class="icon-btn sm" id="btn-attach" title="Attach a file" data-icon="paperclip"></button>
-              <button class="btn primary" id="btn-send" data-icon="send">Send</button>
+
+        <div class="composer-dock">
+          <div class="todo-box" id="todo-box" hidden></div>
+
+          <div class="composer" id="composer">
+            <div class="slash-menu" id="slash-menu" hidden></div>
+            <textarea id="prompt" rows="1" placeholder="Describe the app you want, or ask for a change…" aria-label="Message the agent"></textarea>
+            <div class="composer-bar">
+              <button class="pill" id="btn-mode" title="Permission mode — ⇧Tab to cycle"><span data-icon="shield" data-icon-size="12"></span><span id="mode-label">default</span></button>
+              <button class="pill" id="btn-model" title="Model — click to change"><span data-icon="spark" data-icon-size="12"></span><span id="chip-model-txt">kilo/auto</span></button>
+              <span class="ctx" id="ctx-meter" title="Context used in this session">
+                <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><circle cx="12" cy="12" r="9" class="ctx-track"/><circle cx="12" cy="12" r="9" class="ctx-fill" id="ctx-ring" pathLength="100" stroke-dasharray="0 100"/></svg>
+              </span>
+              <div class="grow"></div>
+              <button class="icon-btn sm" id="btn-attach" title="Attach a file" aria-label="Attach a file" data-icon="paperclip" data-icon-size="15"></button>
+              <button class="btn-send" id="btn-send" title="Send (⌘↵)" aria-label="Send"><span data-icon="arrow-up" data-icon-size="15"></span></button>
+              <button class="btn-stop" id="btn-stop" hidden title="Stop (Esc)" aria-label="Stop"><span data-icon="square" data-icon-size="12"></span></button>
             </div>
           </div>
-          <div class="slash-menu" id="slash-menu" hidden></div>
+
           <div class="suggestions" id="suggestions">
-            <button data-suggest="Make the hero section more dramatic, with a gradient and big type">Make the hero dramatic</button>
-            <button data-suggest="Add a pricing section with three tiers">Add pricing</button>
+            <button data-suggest="Make the hero section more dramatic — gradient, big type, and a stronger headline">Make the hero dramatic</button>
+            <button data-suggest="Add a pricing section with three tiers and a highlighted plan">Add pricing</button>
             <button data-suggest="Make it fully responsive and fix any layout issues on mobile">Fix mobile layout</button>
             <button data-suggest="Add a working contact form that saves to the database">Add a form</button>
           </div>
@@ -112,14 +146,21 @@
       <section class="view" id="view-files">
         <div class="split">
           <div class="pane narrow">
-            <div class="pane-head"><span>Workspace</span><button class="icon-btn sm" id="btn-refresh-files" data-icon="refresh" title="Refresh"></button></div>
+            <div class="pane-head">
+              <span class="pane-title">Workspace</span>
+              <div class="grow"></div>
+              <button class="icon-btn xs" id="btn-refresh-files" title="Refresh" aria-label="Refresh files" data-icon="refresh" data-icon-size="13"></button>
+            </div>
             <div class="tree" id="file-tree"></div>
           </div>
           <div class="pane">
-            <div class="pane-head"><span id="editor-path">No file selected</span><div class="grow"></div>
-              <button class="btn sm" id="btn-save-file" hidden>Save</button>
+            <div class="pane-head">
+              <span class="pane-title mono" id="editor-path">No file selected</span>
+              <div class="grow"></div>
+              <span class="dirty-dot" id="dirty-dot" hidden title="Unsaved changes"></span>
+              <button class="btn sm" id="btn-save-file" hidden data-icon="check" data-icon-size="13">Save</button>
             </div>
-            <textarea class="editor" id="editor" spellcheck="false" placeholder="Select a file to edit…"></textarea>
+            <textarea class="editor" id="editor" spellcheck="false" placeholder="Select a file to edit it here…" aria-label="File editor"></textarea>
           </div>
         </div>
       </section>
@@ -127,9 +168,10 @@
       <!-- terminal -->
       <section class="view" id="view-terminal">
         <div class="term-host" id="term-host"></div>
-        <div class="hint term-hint">
-          Real shell over your files. <code>node</code>, <code>npm install</code>, <code>python</code>, <code>pip</code>,
-          <code>sqlite3</code>, <code>wasm</code>, <code>jobs</code>, and <code>cmd &amp;</code> for background processes.
+        <div class="term-hint">
+          <span class="mono">node</span> <span class="mono">npm install</span> <span class="mono">python</span> <span class="mono">pip</span>
+          <span class="mono">sqlite3</span> <span class="mono">wasm</span> <span class="mono">jobs</span> <span class="mono">cmd &amp;</span>
+          <span class="term-hint-note">real commands, running in your tab</span>
         </div>
       </section>
 
@@ -137,16 +179,26 @@
       <section class="view" id="view-db">
         <div class="split">
           <div class="pane narrow">
-            <div class="pane-head"><span>Databases</span><button class="icon-btn sm" id="btn-new-db" data-icon="plus" title="New database"></button></div>
+            <div class="pane-head">
+              <span class="pane-title">Databases</span>
+              <div class="grow"></div>
+              <button class="icon-btn xs" id="btn-new-db" title="New database" aria-label="New database" data-icon="plus" data-icon-size="13"></button>
+            </div>
             <div class="list" id="db-list"></div>
           </div>
           <div class="pane">
-            <div class="pane-head"><span id="db-path">No database</span><div class="grow"></div><span class="hint" id="db-status"></span></div>
-            <div class="editor-wrap"><textarea class="editor sql" id="db-sql" spellcheck="false" placeholder="SELECT * FROM users;">SELECT name FROM sqlite_master WHERE type='table';</textarea></div>
-            <div class="row">
-              <button class="btn sm" id="btn-db-run" data-icon="play">Run</button>
-              <button class="btn sm" id="btn-db-schema" data-icon="list">Schema</button>
-              <span class="hint">Reads and writes both persist to the file.</span>
+            <div class="pane-head">
+              <span class="pane-title mono" id="db-path">No database</span>
+              <div class="grow"></div>
+              <span class="hint" id="db-status"></span>
+            </div>
+            <div class="editor-wrap">
+              <textarea class="editor sql" id="db-sql" spellcheck="false" aria-label="SQL">SELECT name FROM sqlite_master WHERE type='table';</textarea>
+            </div>
+            <div class="pane-actions">
+              <button class="btn sm primary" id="btn-db-run" data-icon="play" data-icon-size="12">Run</button>
+              <button class="btn sm" id="btn-db-schema" data-icon="list" data-icon-size="12">Schema</button>
+              <span class="hint">Writes persist to the file.</span>
             </div>
             <div class="db-result" id="db-result"></div>
           </div>
@@ -155,72 +207,108 @@
 
       <!-- deploy -->
       <section class="view" id="view-deploy">
-        <div class="deploy-grid">
-          <article class="card lift">
-            <div class="card-icon" data-icon="eye"></div>
-            <h3>Instant preview</h3>
-            <p>Bundle the project into one self-contained page. No account, no build, no waiting.</p>
-            <button class="btn primary" id="btn-deploy-preview" data-icon="bolt">Create preview</button>
-          </article>
-          <article class="card lift">
-            <div class="card-icon" data-icon="github"></div>
-            <h3>Your GitHub</h3>
-            <p>One click, OAuth, no token to paste. AlphaCode pushes the project to <em>your</em> repo.</p>
-            <button class="btn" id="btn-connect-github" data-icon="github">Connect GitHub</button>
-            <div class="hint" id="github-state">not connected</div>
-          </article>
-          <article class="card lift">
-            <div class="card-icon" data-icon="cloud"></div>
-            <h3>Your host</h3>
-            <p>The provider imports your repo and builds on your account. We host nothing.</p>
-            <div class="row">
-              <button class="btn" data-deploy="cloudflare" data-icon="cloud">Cloudflare</button>
-              <button class="btn" data-deploy="vercel" data-icon="triangle">Vercel</button>
-              <button class="btn" data-deploy="netlify" data-icon="diamond">Netlify</button>
-            </div>
-          </article>
+        <div class="deploy-wrap">
+          <header class="view-hero">
+            <h1>Ship it</h1>
+            <p>Preview it here, or push it to a repo you own and let your host build it. AlphaCode hosts nothing.</p>
+          </header>
+
+          <div class="deploy-grid">
+            <article class="ship-card feature">
+              <div class="ship-icon" data-icon="bolt" data-icon-size="18"></div>
+              <div class="ship-body">
+                <h3>Instant preview</h3>
+                <p>Bundle the project into one self-contained page. No account, no build step, no waiting.</p>
+                <button class="btn primary" id="btn-deploy-preview" data-icon="rocket" data-icon-size="14">Create a preview</button>
+              </div>
+            </article>
+
+            <article class="ship-card">
+              <div class="ship-icon" data-icon="github" data-icon-size="18"></div>
+              <div class="ship-body">
+                <h3>Your GitHub</h3>
+                <p>One OAuth click — nothing to paste. The project is pushed to <em>your</em> account.</p>
+                <div class="ship-actions">
+                  <button class="btn" id="btn-connect-github" data-icon="github" data-icon-size="14">Connect GitHub</button>
+                  <span class="hint" id="github-state">not connected</span>
+                </div>
+              </div>
+            </article>
+
+            <article class="ship-card">
+              <div class="ship-icon" data-icon="cloud" data-icon-size="18"></div>
+              <div class="ship-body">
+                <h3>Your host</h3>
+                <p>Import the repo and build on your own account.</p>
+                <div class="ship-actions">
+                  <button class="btn" data-deploy="cloudflare" data-icon="cloud" data-icon-size="14">Cloudflare</button>
+                  <button class="btn" data-deploy="vercel" data-icon="triangle" data-icon-size="14">Vercel</button>
+                  <button class="btn" data-deploy="netlify" data-icon="diamond" data-icon-size="14">Netlify</button>
+                </div>
+              </div>
+            </article>
+          </div>
+
+          <h2 class="section-title">Recent deployments</h2>
+          <div class="list cards" id="deploy-list"></div>
         </div>
-        <h3 class="section-title">Deployments</h3>
-        <div class="list" id="deploy-list"></div>
       </section>
     </section>
 
-    <!-- ───────────────────────── live preview ───────────────────────── -->
+    <!-- ─────────────────────────────── live preview ─────────────────────────────── -->
     <section class="preview-col" id="preview-col" aria-label="Live preview">
       <div class="preview-bar">
-        <div class="devices" role="group" aria-label="Device size">
-          <button class="device active" data-device="desktop" title="Desktop" data-icon="monitor"></button>
-          <button class="device" data-device="tablet" title="Tablet" data-icon="tablet"></button>
-          <button class="device" data-device="mobile" title="Mobile" data-icon="phone"></button>
+        <div class="segmented" role="group" aria-label="Device size">
+          <button class="seg active" data-device="desktop" title="Desktop" aria-label="Desktop" data-icon="monitor" data-icon-size="14"></button>
+          <button class="seg" data-device="tablet" title="Tablet" aria-label="Tablet" data-icon="tablet" data-icon-size="14"></button>
+          <button class="seg" data-device="mobile" title="Phone" aria-label="Phone" data-icon="phone" data-icon-size="14"></button>
         </div>
-        <div class="address" title="This preview is generated in your tab">
+        <div class="address" title="Generated in your tab">
           <span class="dot ok"></span>
           <span id="preview-title">preview</span>
         </div>
         <div class="grow"></div>
-        <button class="icon-btn sm" id="btn-pick" title="Click an element to describe a change" data-icon="cursor"></button>
-        <button class="icon-btn sm" id="btn-preview-refresh" title="Refresh preview" data-icon="refresh"></button>
-        <button class="icon-btn sm" id="btn-preview-open" title="Open in a new tab" data-icon="external"></button>
-        <button class="btn primary sm" id="btn-publish" data-icon="rocket">Publish</button>
+        <button class="icon-btn sm" id="btn-pick" title="Click an element to describe a change" aria-label="Pick an element" data-icon="cursor" data-icon-size="15"></button>
+        <button class="icon-btn sm" id="btn-preview-refresh" title="Refresh" aria-label="Refresh preview" data-icon="refresh" data-icon-size="15"></button>
+        <button class="icon-btn sm" id="btn-preview-open" title="Open in a new tab" aria-label="Open preview in a new tab" data-icon="external" data-icon-size="15"></button>
+        <button class="icon-btn sm only-desktop" id="btn-preview-collapse" title="Hide the preview" aria-label="Hide the preview" data-icon="panel-right" data-icon-size="15"></button>
       </div>
 
       <div class="preview-stage" id="preview-stage">
         <div class="device-frame" id="device-frame">
-          <iframe id="preview-frame" title="Project preview" sandbox="allow-scripts allow-forms allow-modals allow-popups"></iframe>
-          <div class="preview-empty" id="preview-empty">
-            <div class="skeleton" aria-hidden="true">
-              <div class="sk sk-title"></div><div class="sk sk-line"></div><div class="sk sk-line short"></div>
-              <div class="sk-row"><div class="sk sk-card"></div><div class="sk sk-card"></div><div class="sk sk-card"></div></div>
+          <div class="frame-chrome" aria-hidden="true">
+            <span class="fc-dots"><i></i><i></i><i></i></span>
+            <span class="fc-url"><span class="fc-lock" data-icon="lock" data-icon-size="10"></span><span id="frame-url">your-app.local</span></span>
+            <span class="fc-fade"></span>
+          </div>
+          <div class="frame-body">
+            <iframe id="preview-frame" title="Project preview" sandbox="allow-scripts allow-forms allow-modals allow-popups"></iframe>
+            <div class="preview-empty" id="preview-empty">
+              <div class="empty-art" aria-hidden="true">
+                <div class="sk sk-bar"></div>
+                <div class="sk sk-title"></div>
+                <div class="sk sk-line"></div>
+                <div class="sk sk-line short"></div>
+                <div class="sk-row"><div class="sk sk-card"></div><div class="sk sk-card"></div><div class="sk sk-card"></div></div>
+              </div>
+              <p class="empty-title">Your app appears here</p>
+              <p class="empty-sub">Describe what you want on the left — the preview updates as it is written.</p>
+              <div class="empty-chips">
+                <button data-suggest="Build a landing page for a coffee subscription">Try a landing page</button>
+                <button id="btn-empty-template">Browse templates</button>
+              </div>
             </div>
-            <p class="hint">Ask for something and it appears here, live.</p>
           </div>
         </div>
       </div>
 
       <div class="console-drawer" id="console-drawer" hidden>
-        <header><span data-icon="alert"></span><strong id="console-count">No issues</strong><div class="grow"></div>
-          <button class="btn sm" id="btn-fix-errors" data-icon="wand">Fix with AI</button>
-          <button class="icon-btn xs" id="btn-console-close" data-icon="close"></button>
+        <header>
+          <span class="console-icon" data-icon="alert" data-icon-size="14"></span>
+          <strong id="console-count">No issues</strong>
+          <div class="grow"></div>
+          <button class="btn sm primary" id="btn-fix-errors" data-icon="wand" data-icon-size="13">Fix with AI</button>
+          <button class="icon-btn xs" id="btn-console-close" aria-label="Dismiss" data-icon="close" data-icon-size="13"></button>
         </header>
         <pre id="console-body"></pre>
       </div>
@@ -230,38 +318,67 @@
   </main>
 </div>
 
-<!-- ───────────────────────────── templates ───────────────────────────── -->
+<!-- ─────────────────────────────────── templates ─────────────────────────────────── -->
 <div class="sheet" id="template-sheet" hidden>
-  <div class="sheet-card wide">
+  <div class="sheet-card wide" role="dialog" aria-modal="true" aria-labelledby="templates-title">
     <header>
       <div>
-        <h2>What are we building?</h2>
-        <p class="hint">Pick a starting point, or start blank and describe it.</p>
+        <h2 id="templates-title">What are we building?</h2>
+        <p class="hint">Start from a shape, or start blank and describe it.</p>
       </div>
-      <button class="icon-btn" id="btn-close-templates" data-icon="close" aria-label="Close"></button>
+      <button class="icon-btn" id="btn-close-templates" aria-label="Close" data-icon="close" data-icon-size="17"></button>
     </header>
     <div class="template-grid" id="template-grid"></div>
   </div>
 </div>
 
-<!-- ───────────────────────────── history ───────────────────────────── -->
+<!-- ──────────────────────────────────── history ──────────────────────────────────── -->
 <aside class="drawer" id="history-drawer" hidden aria-label="Version history">
-  <header><h2>Version history</h2><button class="icon-btn sm" id="btn-close-history" data-icon="close"></button></header>
+  <header>
+    <div>
+      <h2>Version history</h2>
+      <p class="hint">A checkpoint is saved before the agent changes files.</p>
+    </div>
+    <button class="icon-btn sm" id="btn-close-history" aria-label="Close" data-icon="close" data-icon-size="15"></button>
+  </header>
   <div class="drawer-body" id="history-list"></div>
-  <footer><button class="btn block" id="btn-checkpoint" data-icon="camera">Save a checkpoint now</button></footer>
+  <footer><button class="btn block" id="btn-checkpoint" data-icon="camera" data-icon-size="14">Save a checkpoint now</button></footer>
 </aside>
 
-<!-- ───────────────────────────── settings ───────────────────────────── -->
+<!-- ─────────────────────────────────── command menu ─────────────────────────────── -->
+<div class="modal palette-modal" id="palette" hidden>
+  <div class="palette" role="dialog" aria-modal="true" aria-label="Command menu">
+    <div class="palette-input">
+      <span data-icon="search" data-icon-size="15"></span>
+      <input id="palette-input" type="text" placeholder="Search commands, projects…" autocomplete="off" spellcheck="false">
+      <kbd>esc</kbd>
+    </div>
+    <div class="palette-list" id="palette-list"></div>
+  </div>
+</div>
+
+<!-- ──────────────────────────────────── settings ─────────────────────────────────── -->
 <div class="modal" id="modal" hidden>
   <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
-    <header><h2 id="modal-title">Settings</h2><button class="icon-btn" id="btn-close-modal" data-icon="close" aria-label="Close"></button></header>
+    <header>
+      <h2 id="modal-title">Settings</h2>
+      <button class="icon-btn" id="btn-close-modal" aria-label="Close" data-icon="close" data-icon-size="17"></button>
+    </header>
     <div class="modal-body" id="modal-body"></div>
   </div>
 </div>
 
-<div class="toasts" id="toasts" aria-live="polite"></div>
+<div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
 
 <noscript><p style="padding:24px">AlphaCode is a client-side app and needs JavaScript.</p></noscript>
+<script>
+  // Paint the stored theme before first frame so there is no flash.
+  try {
+    var t = localStorage.getItem('alphacode-theme');
+    if (!t) t = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+    document.documentElement.dataset.theme = t;
+  } catch (e) {}
+</script>
 <script type="module" src="/assets/app.js"></script>
 </body>
 </html>

@@ -1,229 +1,208 @@
 # AlphaCode
 
-**A real coding-agent harness platform.** Not an in-browser toy: a single agentic
-loop with ~30 tools, a genuine PTY shell, real Node.js/npm and Python runtimes,
-SQLite editing, git, checkpoints, subagents, and one-click deploys to
-Cloudflare / Netlify / Vercel — with a free tier that needs no API key at all.
+**A coding agent that runs entirely in your browser.** No backend, no database
+server, no runtime server — the agent loop, the filesystem, the shell, SQLite
+and the preview server all execute in the tab. Your files never leave it.
 
 ```
-guest ─────────────────────────────────────────────► kilo/auto (free, no key)
-signed in ──► OpenRouter ──► OpenCode Zen ──► Google AI Studio ──► kilo/auto
-             └──────────── 40 requests / day ────────────┘
-BYOK (any tier) ──► your provider, your key, no quota
+   your browser tab
+┌──────────────────────────────────────────────────────────────┐
+│  agent loop ──► tools ──► files (OPFS) ──► shell ──► SQLite  │
+│      │                        │             (sql.js/WASM)    │
+│      └──► model provider  ◄───┘                     │        │
+│           (Kilo free · OpenCode · your key)         ▼        │
+│                                              deploy or preview│
+└──────────────────────────────────────────────────────────────┘
+                     │                        │
+        push to *your* GitHub        import into *your* host
+        (OAuth, no token paste)      (Cloudflare / Vercel / Netlify)
 ```
+
+Nothing is hosted by us: there is no AlphaCode server to deploy, scale, or pay
+for. What we ship is a static bundle you can put on any static host.
 
 ---
 
-## Quick start
+## What it does
+
+| Area | Implementation in the tab |
+| --- | --- |
+| Agent loop | Streaming tool loop, plan / default / accept-edits / bypass modes, compaction, checkpoints, subagents, stop button |
+| Tools | ~25: read, write, edit, multi-edit, apply-diff, glob, grep, todo, shell, database, preview, deploy, fetch |
+| Files | Real files in OPFS (`navigator.storage`), IndexedDB fallback, project isolation, 8 MB per file |
+| Shell | `ls cd pwd cat echo mkdir rm mv cp touch head tail wc grep find sort uniq sed kind`, pipes, `&&`/`||`, redirects, `>` `>>`, env vars |
+| SQLite | Real SQLite compiled to WASM (sql.js): schema browser, inline row editing, import/export |
+| Python | Pyodide, loaded on demand (~10 MB, first use only) |
+| Node | Sandboxed JS in an isolated interpreter with a virtual `fs`/`console` bound to the project |
+| Preview | Self-contained HTML preview, instant, no account and no deploy |
+| Deploys | Push to *your* GitHub with one OAuth click, then import into your own Cloudflare / Vercel / Netlify account |
+| Models | Keyless free routing (Kilo, OpenCode Zen), plus BYOK for OpenAI, Anthropic, Google, Groq, DeepSeek, Mistral, xAI, Together, OpenRouter, or any OpenAI-compatible endpoint |
+| Keys | Stored in the browser (IndexedDB + `localStorage`), never sent anywhere except to the provider you chose |
+
+---
+
+## Deploy it (Cloudflare Pages — the recommended path)
+
+Cloudflare Pages builds straight from this GitHub repo. You can connect it as
+soon as **the repository contains `package.json`, `scripts/build-pages.mjs`,
+`web/` and `public/`** — i.e. right now, on `main` after this merges.
+
+1. **Cloudflare dashboard → Workers & Pages → Create → Pages → Connect to Git.**
+2. Pick the `Time-dev-alt/Nex` repository and the `main` branch.
+3. **Framework preset:** `None`. **Build command:** `npm run build`.
+   **Build output directory:** `dist`. **Root directory:** `/`.
+4. **Environment variables** (Production *and* Preview):
+   - `NODE_VERSION` = `22`
+   - `GITHUB_CLIENT_ID` = *(optional — only for "publish to my GitHub")*
+   - `GITHUB_CLIENT_SECRET` = *(optional, same feature)*
+5. **Save and Deploy.** The first build installs `esbuild` + `sql.js`, bundles
+   `web/` into `dist/assets/app.<hash>.js` with SRI hashes, copies the SQLite
+   WASM, validates `functions/`, and writes `_headers` + `_redirects`.
+   No functions are required for the app itself; only the OAuth popup uses them.
+6. Every later `git push` to `main` rebuilds automatically, and pull requests
+   get their own preview URL.
+
+Full walkthroughs for Netlify, Vercel and plain static hosting: [`docs/DEPLOY.md`](docs/DEPLOY.md).
+
+> **Note on Cloudflare's UI:** new projects in the dashboard are nudged towards
+> *Workers* (Workers Builds). This repo works on **both**:
+> - **Pages** → build `npm run build`, output `dist` (route `functions/` is picked up automatically).
+> - **Workers + static assets** → build `npm run build`, deploy command `npx wrangler deploy` (uses the committed `wrangler.jsonc`, `assets.directory = "dist"`).
+>
+> Direct upload also works: `npx wrangler pages deploy dist --project-name alphacode`.
+
+### Same repo on Netlify or Vercel
+
+Both configs are committed and need no dashboard fiddling:
+
+| Host | Build command | Publish / output | Config file |
+| --- | --- | --- | --- |
+| Cloudflare Pages | `npm run build` | `dist` | `wrangler.jsonc`, `functions/`, `dist/_headers` |
+| Netlify | `npm run build` | `dist` | `netlify.toml`, `netlify/functions/` |
+| Vercel | `npm run build` | `dist` | `vercel.json`, `api/` |
+
+---
+
+## Connect GitHub without pasting a token
+
+Deploys must land in **your** accounts, so AlphaCode never asks for an API key
+or a personal access token for GitHub. Instead:
+
+1. Create a GitHub OAuth App → <https://github.com/settings/developers> →
+   **New OAuth App**.
+2. **Authorization callback URL:** `https://<your-domain>/api/oauth/github/callback`
+3. Put `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` in your host's environment
+   variables (Cloudflare Pages / Netlify / Vercel). The secret is used only by
+   that one function; the browser bundle never sees it.
+4. In the app press **Connect GitHub** → a popup opens GitHub → after you
+   approve, the popup posts the token back to the app window and closes.
+
+If you don't configure OAuth, everything still works except publishing to
+GitHub: the harness, files, shell, database, previews and exports are local.
+
+The same "no token paste" rule applies to hosting: AlphaCode pushes a repo to
+*your* GitHub, then hands you the provider's own import URL
+(`vercel.com/new/clone?repository-url=…`, `app.netlify.com/start/deploy?…`,
+`deploy.workers.cloudflare.com/?url=…`). The build runs on *your* account and
+bills *your* plan — we never hold credentials for it.
+
+---
+
+## Run it locally
 
 ```bash
-npm install
-npm start                     # http://localhost:3000
+npm install            # esbuild + sql.js are only needed at build time
+npm start              # builds dist/ and serves it on http://localhost:3001
+npm run dev            # same, with the OAuth functions shimmed
 ```
 
-No keys? You still get the full harness — the guest tier routes every request
-to `kilo/auto` (Kilo's free router, ~200 req/h per IP, no account). Want to see
-the UI offline, with zero network?
+`npm start` serves exactly what Pages serves: a static bundle plus
+`/api/health` and the two OAuth routes. There is no application server.
 
 ```bash
-ALPHACODE_MOCK=1 npm start    # deterministic demo provider, all tools still run
+npm run build          # → dist/  (hashed assets, SRI, minified)
+npm run build:obfuscate#  + javascript-obfuscator on the app bundle
+npm test               # 101 tests: engine, DOM, MCP, hooks, build, edge
 ```
 
-Production build (hashed assets + SRI + minified, optionally obfuscated):
+Tests that matter for the client build:
 
-```bash
-npm run build                 # → dist/   (cd dist && node start.mjs)
-npm run obfuscate             # protected client bundle
-npm test                      # 58 unit, integration, DOM, MCP, hooks, edge + build tests
-npm run smoke                 # 18 end-to-end checks against a live server
-```
-
-Requirements: Node **22.5+** (uses `node:sqlite`), bash, and optionally
-`python3`/`gcc` for the native PTY helper (`npm run pty:build`; the fallback
-uses `script`, so a terminal always works).
+- `tests/engine.test.mjs` — 33 cases over the browser engine (store, fs,
+  shell, SQLite, zip, providers, tools, harness, deploy). Runs in Node.
+- `tests/pages-app.test.mjs` — 10 cases that boot the **built** `dist/` bundle
+  in jsdom: full agent turn, shell command, SQLite edit, deploy, OAuth hand-off,
+  key persistence and ZIP export.
 
 ---
 
-## Access tiers
-
-| | Guest (no login) | Signed in | BYOK |
-|---|---|---|---|
-| Model | `kilo/auto` only | free models across 3 providers | any model your key can reach |
-| Quota | 30 turns/hour per IP | **40 requests/day** (UTC reset) | no quota |
-| Keys needed | none, ever | none — instance keys, else `kilo/auto` | your own key |
-| Projects, shell, deploys | ✅ | ✅ | ✅ |
-
-* Every key is read from the environment (`OPENROUTER_API_KEY`,
-  `OPENCODE_API_KEY`, `GOOGLE_AI_STUDIO_API_KEY`, `KILO_API_KEY`) — set once in
-  the Cloudflare dashboard, never in code, never sent to the browser.
-* The catalog is **free models only** for the shared pool: `:free` /
-  zero-priced models are the single admission rule (`isFreeModel` in
-  `src/providers/index.mjs`), so a paid model can never be reached on our dime.
-* When the shared chain is exhausted (`402/403/429`, provider outage, quota
-  spent) the request falls through to `kilo/auto` instead of failing.
-* **BYOK** works for guests *and* signed-in users: any OpenAI-compatible
-  endpoint (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, Groq, DeepSeek, Mistral,
-  xAI, Together, or a custom base URL). Keys are AES-256-GCM encrypted at rest
-  with a per-install secret and shown back only masked (`sk-o…mnop`).
-* Signing in is deliberately cheap: username + password hashed with salted
-  scrypt (N=16384, r=8, p=1, 96 MB maxmem), HTTP-only signed session cookie,
-  per-session CSRF token.
-  Registration can be closed with `ALPHACODE_ALLOW_REGISTRATION=false`.
-
----
-
-## Harness fidelity (target: Claude Code ≈95%)
-
-The loop is the same shape Claude Code uses: **assemble context → call model →
-gate the tool → execute → feed results back**, repeat until the model stops
-asking for tools.
-
-| Claude Code | AlphaCode |
-|---|---|
-| agentic turn loop with tool results fed back | `src/agent/harness.mjs` (`AgentHarness`, ≤48 iterations, 240 s request budget) |
-| Read / Write / Edit / MultiEdit | `read`, `write`, `edit`, `multiedit` (unified-diff payloads, fuzzy context match) |
-| Bash (persistent-ish shells) | `bash`, `bash_output`, `kill_shell` — real `bash -lc` in the project cwd, output truncated at 28 KB |
-| Glob / Grep / LS | glob with `**`, `{a,b}` and `?`, ripgrep-class search fallback, tree listing |
-| TodoWrite working memory | `todo_write`, re-injected after every tool call |
-| Task / subagents (Explore) | `task` with isolated context + read-only tool subset, returns a summary |
-| Plan mode (read-only) | plan mode restricts the toolset to read/glob/grep/ls and ends via `exit_plan_mode` |
-| Permission modes | `plan` • `auto` • `accept-edits` • `manual` — every tool call passes the gate |
-| Auto-compaction near the window | graduated compaction at 86 % of the window with a model-written summary (`/compact`, `/context`) |
-| CLAUDE.md memory hierarchy | `ALPHACODE.md` / `AGENTS.md` at project + workspace + user level, loaded on every turn |
-| Append-only JSONL transcript + rewind | run transcript + `checkpoint` tool (diff snapshots before edits, rewindable) |
-| NotebookEdit | `notebook_edit` for `.ipynb` cells |
-| WebFetch / WebSearch | `web_fetch`, `web_search` (allow-listed, no localhost) |
-| Hooks (`settings.json`) | `data/hooks.json`: PreToolUse / PostToolUse / PreCompact / SessionStart / SessionEnd, regex matchers, JSON on stdin, exit 2 blocks the call |
-| MCP servers | `ALPHACODE_MCP_SERVERS` / `data/mcp.json` → stdio JSON-RPC client, tools exposed as `mcp__server__tool` |
-| Tool-name healing | `repairToolPairs` + `extractTextToolCalls` recover broken/inlined tool calls instead of crashing the turn |
-
-Measured against Claude Code at **94 % weighted parity**, with the scorecard,
-the deliberate differences and the remaining 6 % listed in
-[`docs/PARITY.md`](docs/PARITY.md).
-
-Extras Claude Code doesn't have: `deploy` (three clouds + claimable previews),
-nine `db_*` tools for real database editing, `runtime_info`, `install_deps`.
-
----
-
-## Runtimes: Node, npm, Python, SQLite, a real shell
-
-* **Node.js + npm** — `detect()` finds the host runtime; `installVersion()`
-  installs a pinned Node into `data/runtimes/node-<version>/` on demand, and
-  `runtimePathDirs()` puts every managed `bin/` and `node_modules/.bin` on the
-  `PATH` of every tool invocation. `package.json` `engines` are honoured.
-* **Python** — `python3 -m venv .venv` per project, `pip install` into it, and
-  the venv's bin dir is prepended to `PATH` for subsequent commands, so
-  `python app.py` and `pip` behave exactly like a local dev box.
-* **Shell** — a real PTY (`native/ptyhelper.c` → `data/bin/ptyhelper`, or
-  `script(1)` as fallback) over a WebSocket-free SSE/HTTP channel: interactive
-  `vim`, `top`, `Ctrl-C`, resize (`SIGWINCH`), colours, alternate screen.
-  The terminal buffer is a full ANSI/xterm emulator in `public/assets/term.js`.
-* **Databases** — `node:sqlite` is built in (no native module): list databases,
-  introspect schema (tables, columns, indexes), read rows, run arbitrary SQL,
-  and **write** rows/insert/delete — each statement parsed and split safely
-  (quotes, comments, `BEGIN…COMMIT`), with a read-only mode for `db_query`
-  so a SELECT can never mutate.
-
----
-
-## Deployments
-
-The agent can deploy the project it just wrote, three ways:
-
-1. **With a token** (Settings → Deploy tokens, or instance env): it builds,
-   then uploads to Cloudflare Pages / Netlify / Vercel and returns the live URL.
-   Tokens are per-user, encrypted, and only ever used server-side.
-2. **Without a token**: the build is published to a sandboxed preview at
-   `/p/<id>/` and the user is given a **claim link** (`/claim/<token>`) plus a
-   "Claim URL" button. Claiming binds the deployment to the signed-in account
-   and makes it permanent; unclaimed previews expire after 7 days
-   (`ALPHACODE_CLAIM_TTL_HOURS`). Claim is idempotent-safe: the first call wins,
-   the second returns `400`.
-3. Previews are served with `Content-Security-Policy: sandbox …` and no cookies,
-   so generated (untrusted) code can never touch the platform origin.
-
-### Deploying AlphaCode itself
-
-**Cloudflare** (edge facade + static assets, runtime behind it):
-
-```bash
-npm run deploy:cloudflare -- --dry-run                     # bundle + wrangler config, no upload
-export CLOUDFLARE_API_TOKEN=…  CLOUDFLARE_ACCOUNT_ID=…
-npm run deploy:cloudflare -- --origin=https://runtime.example.com
-```
-
-The Worker (`src/edge/worker.mjs`) serves the hashed/obfuscated client from
-Workers Static Assets, streams `/api/*` and `/p/*` to the Node runtime, and
-answers 503 with a precise hint if `ALPHACODE_ORIGIN` is unset. The runtime
-itself is a container — `Dockerfile` (Node 22, npm 11, Python 3, bash/zsh, git,
-gcc, sqlite3) runs anywhere: Cloudflare Containers, Fly, Railway, Render, a VPS.
-
-**Netlify / Vercel**: the same split works — deploy `dist/public` as the static
-site and point `/api/*`, `/p/*` at the runtime with a rewrite
-(`netlify.toml` / `vercel.json`), or deploy the container image directly.
-
----
-
-## Security
-
-* **Client code is protected**: minified, then `javascript-obfuscator`
-  (control-flow flattening, dead-code injection, string-array rotation), with
-  content-hashed filenames and `sha384` SRI on every `<script>`/`<link>` so a
-  tampered bundle refuses to execute. `dist/integrity.json` records every hash.
-* **Platform hardening**: locked-down CSP (`default-src 'self'`, no
-  `unsafe-eval`, no third-party origins — only the inline boot config is
-  allowed), per-route rate limits, CSRF tokens on all mutating API calls, signed
-  HTTP-only cookies, `SameSite=Lax`, constant-time secret comparison, path
-  traversal blocking on every fs route (403, not 500), command-risk
-  classification (`rm -rf /`, `curl | bash`, `sudo`, `git push --force`) surfaced
-  in the UI before a tool runs, and a sandboxed origin for all generated code.
-* **No secrets in the client**: provider keys, deploy tokens and the signing
-  secret never leave the server; user-provided keys are encrypted at rest and
-  masked on read.
-* **Untrusted output stays untrusted**: previews are `sandbox`, model output is
-  escaped before markdown rendering, and only `http(s)` links survive.
-
----
-
-## HTTP API (all JSON unless noted)
+## Architecture
 
 ```
-GET  /healthz                        liveness + runtime facts
-GET  /api/bootstrap                  session, tiers, limits, capabilities
-GET  /api/models                     free-model catalog + BYOK providers
-POST /api/auth/register|login|logout GET /api/auth/me
-CRUD /api/projects                   + /files /file /search /export /terminals
-POST /api/projects/:id/runs          start an agent run
-GET  /api/runs/:id/stream            SSE: start, model, text, usage, tool_*, done
-     /api/terminal/:sid/stream|input|resize|close
-GET  /api/projects/:id/database/schema|rows   POST …/database/rows
-     /api/projects/:id/git  (status, diff, commit, history …)  /api/runtime
-GET  /api/deployments   POST /api/projects/:id/deploy   GET /api/claim/:token
-GET  /api/settings      PUT  /api/settings   (BYOK + deploy tokens)
+web/engine/        the product
+  store.js         IndexedDB (users, projects, threads, messages, settings, snapshots)
+  fs.js            OPFS → IndexedDB → memory, project-scoped paths, glob/grep
+  shell.js         POSIX-ish shell: parser, pipes, redirects, builtins
+  db.js            SQLite via sql.js/WASM, statement splitting, row editing
+  providers.js     model routing, streaming, retries, demo provider
+  tools.js         tool registry, permission modes, unified diffs
+  harness.js       the agent loop, compaction, checkpoints, subagents
+  deploy.js        preview bundle, GitHub OAuth publish, provider import URLs
+  zip.js           ZIP reader/writer for project export/import
+web/app/           UI (vanilla, no framework, ~0 dependencies at runtime)
+functions/         two Cloudflare Pages Functions: GitHub OAuth start/callback
+scripts/           build + dev server
 ```
+
+Runtime dependencies: **none**. The bundle is plain ES modules compiled with
+`esbuild`; the only binary asset is `sql-wasm.wasm` (669 KB).
+
+### Why there is no server
+
+Every "backend" job has a browser equivalent that is good enough, and often
+better for privacy:
+
+| Server job | In-browser replacement |
+| --- | --- |
+| Postgres/SQLite | SQLite compiled to WASM, file lives in OPFS |
+| Filesystem + shell | OPFS + a shell implemented over it |
+| Node/Python runtime | Sandboxed JS interpreter + Pyodide |
+| Secrets store | The user's own browser storage; provider keys go only to the provider |
+| Deploy API (`wrangler`, `vercel`, `netlify`) | OAuth to the user's GitHub + the provider's own import URL |
 
 ---
 
-## Project layout
+## Security model
 
-```
-src/
-  server.mjs              HTTP server, SSE, static assets, hard limits
-  auth.mjs  policy.mjs    sessions/CSRF · tiers, quotas, model routing
-  agent/                  prompt, tools (30), harness (loop, compaction), mcp, hooks
-  providers/index.mjs     OpenRouter · Zen · Google · Kilo · BYOK, streaming
-  runtime/                exec, pty, runtimes, git, database, path sandbox
-  deploy/index.mjs        Cloudflare / Netlify / Vercel + claimable previews
-  lib/                    config, crypto, http, store (node:sqlite), log
-  edge/worker.mjs         Cloudflare Worker facade (assets + proxy)
-public/                   app shell, ANSI terminal, markdown renderer, claim page
-native/ptyhelper.c        tiny termios PTY bridge
-deploy/                   netlify.toml + vercel.json templates (edge proxy)
-scripts/                  build (hash+SRI+obfuscate), smoke, cloudflare deploy, edge config
-docs/PARITY.md            Claude Code parity scorecard (94 % weighted)
-tests/                    provider, unit, client (ANSI), DOM boot, MCP, hooks, edge, build — 58 tests
-```
+- Static hosting only: no server process, no database, no sessions on our side.
+- SRI on the app bundle and stylesheet; `nosniff`, `no-referrer`,
+  `Permissions-Policy`, COOP, HSTS via `_headers`; a strict CSP via
+  `functions/_middleware.js`.
+- Model keys stay in the browser and are sent only to the provider endpoint the
+  user configured. `connect-src https:` is deliberate: BYOK means the user
+  chooses the endpoint, so an allowlist would break custom base URLs.
+- The shell refuses `sudo`, `curl`, background jobs and anything that would
+  reach outside the project directory.
+- Clearing site data deletes the workspace — that is the honest trade-off of a
+  zero-backend product. Use **Export project** (ZIP) for anything you care about.
+
+### Known limits (by design, not bugs)
+
+- Python packages are limited to the Pyodide distribution; native Node addons,
+  real `npm install`, and PTY programs cannot run in a tab.
+- 8 MB per file; total storage is bounded by the browser's quota for the origin.
+- No background execution once the tab closes, no cron, no webhooks.
+- If a browser blocks persistent storage (private mode, sandboxed third-party
+  frame), AlphaCode falls back to an in-memory filesystem and says so in the
+  file panel — export before closing the tab.
+
+---
+
+## Legacy server edition
+
+The earlier server-based harness (`src/`, `public/`, `Dockerfile`, `deploy/`)
+is still in the tree and still tested, but it is **not** what gets deployed
+from this repo any more. `npm run start:server` runs it on port 3000 if you want
+to compare. The browser engine shares no code with it and needs no server.
 
 ## Licence
 

@@ -74,8 +74,12 @@ class McpClient {
       const env = { ...process.env, ...this.spec.env };
       let child;
       try {
+        // A configured cwd that no longer exists makes spawn() fail with an
+        // unhelpful ENOENT on the *binary*; fall back to the process cwd.
+        const desired = this.spec.cwd || config.workspaceRoot || process.cwd();
+        const cwd = fs.existsSync(desired) ? desired : process.cwd();
         child = spawn(this.spec.command, this.spec.args, {
-          cwd: this.spec.cwd || config.workspaceRoot || process.cwd(),
+          cwd,
           env,
           stdio: ['pipe', 'pipe', 'pipe'],
         });

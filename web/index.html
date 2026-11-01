@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>AlphaCode — the coding agent that runs in your browser</title>
+<meta name="description" content="A real coding agent harness in your browser. Files, shell, SQLite and deploys — all client-side, all yours.">
+<meta name="theme-color" content="#0a0b0f" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#faf9f7" media="(prefers-color-scheme: light)">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<div class="app" id="app">
+  <header class="topbar">
+    <button class="icon-btn" id="btn-menu" aria-label="Toggle sidebar" data-icon="menu"></button>
+    <a class="brand" href="/" data-icon="logo" aria-label="AlphaCode"></a>
+    <div class="chips">
+      <span class="chip" id="chip-runtime" title="Everything runs in this tab"><span data-icon="cpu"></span><span id="chip-runtime-txt">browser</span></span>
+      <span class="chip" id="chip-model" title="Current model"><span data-icon="spark"></span><span id="chip-model-txt">kilo/auto</span></span>
+      <span class="chip" id="chip-github" title="GitHub connection" hidden><span data-icon="github"></span><span id="chip-github-txt">—</span></span>
+    </div>
+    <div class="grow"></div>
+    <span class="status"><span class="dot ok" id="status-dot"></span><span id="status-text">ready</span></span>
+    <button class="btn sm" id="btn-settings" data-icon="gear">Settings</button>
+  </header>
+
+  <aside class="sidebar" id="sidebar">
+    <div class="side-head">
+      <h2>Projects</h2>
+      <button class="icon-btn sm" id="btn-new-project" title="New project" data-icon="plus"></button>
+    </div>
+    <div class="side-list" id="project-list"></div>
+    <div class="side-head">
+      <h2>Sessions</h2>
+      <button class="icon-btn sm" id="btn-new-session" title="New session" data-icon="plus"></button>
+    </div>
+    <div class="side-list" id="session-list"></div>
+    <div class="side-foot">
+      <div class="mini" id="storage-note">Files stay in this browser.</div>
+    </div>
+  </aside>
+
+  <main class="main" id="main">
+    <div class="tabs" role="tablist">
+      <button class="tab active" data-view="chat" role="tab" data-icon="chat">Chat</button>
+      <button class="tab" data-view="files" role="tab" data-icon="file">Files</button>
+      <button class="tab" data-view="terminal" role="tab" data-icon="terminal">Terminal</button>
+      <button class="tab" data-view="db" role="tab" data-icon="database">Database</button>
+      <button class="tab" data-view="deploy" role="tab" data-icon="rocket">Deploy</button>
+      <div class="grow"></div>
+      <button class="btn sm ghost" id="btn-export" data-icon="download" title="Download the project as a zip">Export</button>
+      <button class="btn sm ghost" id="btn-preview" data-icon="eye" title="Open a local preview">Preview</button>
+    </div>
+
+    <!-- chat -->
+    <section class="view active" id="view-chat">
+      <div class="transcript" id="transcript" aria-live="polite"><div class="transcript-inner" id="transcript-inner"></div></div>
+      <div class="composer-wrap">
+        <div class="mode-row">
+          <button class="pill" id="btn-mode" title="Permission mode (⇧Tab)">mode: default</button>
+          <button class="pill" id="btn-model">model: kilo/auto</button>
+          <span class="hint" id="ctx-meter" title="Context usage">0%</span>
+          <div class="grow"></div>
+          <button class="pill" id="btn-stop" hidden>Stop</button>
+        </div>
+        <div class="composer">
+          <textarea id="prompt" rows="1" placeholder="Describe what to build…  /  for commands"></textarea>
+          <button class="btn primary" id="btn-send" data-icon="send">Send</button>
+        </div>
+        <div class="slash-menu" id="slash-menu" hidden></div>
+      </div>
+    </section>
+
+    <!-- files -->
+    <section class="view" id="view-files">
+      <div class="split">
+        <div class="pane narrow">
+          <div class="pane-head"><span>Workspace</span><button class="icon-btn sm" id="btn-refresh-files" data-icon="refresh" title="Refresh"></button></div>
+          <div class="tree" id="file-tree"></div>
+        </div>
+        <div class="pane">
+          <div class="pane-head"><span id="editor-path">No file selected</span><div class="grow"></div>
+            <button class="btn sm" id="btn-save-file" hidden>Save</button>
+          </div>
+          <textarea class="editor" id="editor" spellcheck="false" placeholder="Select a file to edit…"></textarea>
+        </div>
+      </div>
+    </section>
+
+    <!-- terminal -->
+    <section class="view" id="view-terminal">
+      <div class="term-host" id="term-host"></div>
+      <div class="hint term-hint">A real shell over your project files — <code>ls</code>, <code>cat</code>, <code>grep</code>, <code>node</code>, <code>sqlite3</code>, <code>python</code>. Type <code>help</code>.</div>
+    </section>
+
+    <!-- database -->
+    <section class="view" id="view-db">
+      <div class="split">
+        <div class="pane narrow">
+          <div class="pane-head"><span>Databases</span><button class="icon-btn sm" id="btn-new-db" data-icon="plus" title="New database"></button></div>
+          <div class="list" id="db-list"></div>
+        </div>
+        <div class="pane">
+          <div class="pane-head"><span id="db-path">No database</span><div class="grow"></div><span class="hint" id="db-status"></span></div>
+          <div class="editor-wrap"><textarea class="editor sql" id="db-sql" spellcheck="false" placeholder="SELECT * FROM users;">SELECT name FROM sqlite_master WHERE type='table';</textarea></div>
+          <div class="row">
+            <button class="btn sm" id="btn-db-run" data-icon="play">Run</button>
+            <button class="btn sm" id="btn-db-schema" data-icon="list">Schema</button>
+            <span class="hint">Read-only queries and writes both persist to the file.</span>
+          </div>
+          <div class="db-result" id="db-result"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- deploy -->
+    <section class="view" id="view-deploy">
+      <div class="deploy-grid">
+        <article class="card">
+          <h3>1 · Preview (no account)</h3>
+          <p>Bundle the project into one self-contained page and open it. Save the link to keep it in this browser.</p>
+          <button class="btn primary" id="btn-deploy-preview" data-icon="eye">Create preview</button>
+        </article>
+        <article class="card">
+          <h3>2 · Your GitHub</h3>
+          <p>Connect GitHub with one click (OAuth). AlphaCode pushes the project to <em>your</em> repository — no token to paste.</p>
+          <button class="btn" id="btn-connect-github" data-icon="github">Connect GitHub</button>
+          <div class="hint" id="github-state">not connected</div>
+        </article>
+        <article class="card">
+          <h3>3 · Your host</h3>
+          <p>Pick where it should live. The provider imports your repo and builds it on your account.</p>
+          <div class="row">
+            <button class="btn" data-deploy="cloudflare" data-icon="cloud">Cloudflare</button>
+            <button class="btn" data-deploy="vercel" data-icon="triangle">Vercel</button>
+            <button class="btn" data-deploy="netlify" data-icon="diamond">Netlify</button>
+          </div>
+          <div class="hint">We host nothing: the build and the bill are on your account, and the site is yours.</div>
+        </article>
+      </div>
+      <h3 class="section-title">Deployments</h3>
+      <div class="list" id="deploy-list"></div>
+    </section>
+  </main>
+</div>
+
+<!-- settings modal -->
+<div class="modal" id="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <header><h2 id="modal-title">Settings</h2><button class="icon-btn" id="btn-close-modal" data-icon="close" aria-label="Close"></button></header>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<noscript><p style="padding:24px">AlphaCode is a client-side app and needs JavaScript.</p></noscript>
+<script type="module" src="/assets/app.js"></script>
+</body>
+</html>

@@ -1,24 +1,25 @@
 {
   "name": "alphacode",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "private": true,
   "type": "module",
-  "description": "AlphaCode — a real coding agent harness platform (agent loop, real shell, database editing, one-click deploys).",
+  "description": "AlphaCode — a coding agent that runs entirely in your browser. Files, shell, SQLite and deploys, all client-side.",
   "license": "MIT",
   "engines": {
     "node": ">=22.5.0"
   },
   "scripts": {
-    "start": "node --disable-warning=ExperimentalWarning src/server.mjs",
-    "dev": "node --disable-warning=ExperimentalWarning --watch-path=src --watch-path=public src/server.mjs",
-    "build": "node scripts/build.mjs",
-    "obfuscate": "node scripts/build.mjs --obfuscate",
+    "start": "node scripts/dev-pages.mjs",
+    "dev": "node --disable-warning=ExperimentalWarning scripts/dev-pages.mjs",
+    "build": "node scripts/build-pages.mjs",
+    "build:obfuscate": "node scripts/build-pages.mjs --obfuscate",
+    "build:server": "node scripts/build.mjs",
     "test": "node --disable-warning=ExperimentalWarning --test \"tests/*.test.mjs\"",
     "smoke": "node --disable-warning=ExperimentalWarning scripts/smoke.mjs",
     "pty:build": "bash scripts/build-pty.sh",
     "deploy:cloudflare": "node scripts/deploy-cloudflare.mjs",
     "edge:config": "node scripts/render-edge-config.mjs",
-    "build:secure": "node scripts/build.mjs --obfuscate"
+    "start:server": "node --disable-warning=ExperimentalWarning src/server.mjs"
   },
   "optionalDependencies": {},
   "keywords": [
@@ -30,7 +31,11 @@
   ],
   "devDependencies": {
     "javascript-obfuscator": "^4.2.2",
-    "wrangler": "^4.156.0",
-    "jsdom": "^30.1.3"
+    "jsdom": "^30.1.3",
+    "wrangler": "^4.156.0"
+  },
+  "dependencies": {
+    "esbuild": "^0.28.2",
+    "sql.js": "^1.15.2"
   }
 }

@@ -1,16 +1,13 @@
 {
+  // Workers Static Assets deployment of the client-side build.
+  // The recommended path is Cloudflare **Pages** + Git (see README); this file
+  // lets `wrangler deploy` publish the same dist/ as a Worker with assets only.
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "alphacode",
-  "main": "src/edge/worker.mjs",
   "compatibility_date": "2025-09-01",
-  "compatibility_flags": ["nodejs_compat"],
   "assets": {
-    "directory": "dist/public",
-    "binding": "ASSETS",
-    "run_worker_first": true
+    "directory": "dist",
+    "not_found_handling": "single-page-application"
   },
-  "observability": { "enabled": true },
-  "vars": {
-    "ALPHACODE_ORIGIN": ""
-  }
+  "observability": { "enabled": true }
 }

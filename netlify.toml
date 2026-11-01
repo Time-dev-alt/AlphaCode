@@ -1,0 +1,39 @@
+# AlphaCode on Netlify — client-side build (no server).
+# All agent work happens in the browser; the only functions are the OAuth ones.
+[build]
+  command = "npm run build"
+  publish = "dist"
+  functions = "netlify/functions"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+# OAuth pop-up endpoints (GitHub) → the single function.
+[[redirects]]
+  from = "/api/oauth/github/*"
+  to = "/.netlify/functions/github-oauth/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/health"
+  to = "/.netlify/functions/github-oauth/health"
+  status = 200
+
+# SPA hash routes are served by index.html anyway; keep a fallback.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "no-referrer"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=(), payment=(), usb=()"

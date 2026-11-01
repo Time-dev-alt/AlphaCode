@@ -287,6 +287,16 @@ check('publishes a claimable preview and serves it sandboxed', async () => {
   assert.match(page.headers.get('content-security-policy') || '', /sandbox/);
 });
 
+check('serves a working claim page (CSRF-aware, no global secrets)', async () => {
+  const res = await fetch(`${BASE}/claim/${claimToken}`);
+  assert.equal(res.status, 200);
+  const html = await res.text();
+  assert.match(html, /Claim this app/);
+  // The page signs users in and claims via POST: it must send the CSRF header.
+  assert.match(html, /X-Alphacode-CSRF/);
+  assert.match(html, /\/api\/bootstrap/);
+});
+
 check('accepts a claim for the deployment', async () => {
   const info = await req('GET', `/api/claim/${claimToken}`);
   assert.equal(info.status, 200);

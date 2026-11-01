@@ -17,6 +17,8 @@ import { randomId } from '../lib/crypto.mjs';
 import { streamChat, estimateTokens, ProviderError, PROVIDER_META } from '../providers/index.mjs';
 import { buildSystemPrompt, readProjectMemory } from './prompt.mjs';
 import { buildTools, toOpenAITools, toolsForMode, backgroundShells } from './tools.mjs';
+import { loadMcpTools, shutdownMcp } from './mcp.mjs';
+import { fireHooks } from './hooks.mjs';
 import { planModelRequest, shouldFallback, bumpUsage, anyByok } from '../policy.mjs';
 import { detect } from '../runtime/runtimes.mjs';
 import { userEnv } from '../runtime/exec.mjs';
@@ -280,10 +282,32 @@ export class AgentHarness {
     }
   }
 
+  /** Connect configured MCP servers and expose their tools to this agent. */
+  async attachMcpTools() {
+    if (this.mcpLoaded) return;
+    this.mcpLoaded = true;
+    try {
+      const extra = await loadMcpTools();
+      if (!extra.length) return;
+      const known = new Set(this.tools.map((t) => t.name));
+      let added = 0;
+      for (const tool of extra) {
+        if (known.has(tool.name)) continue;
+        this.tools.push(tool);
+        added++;
+      }
+      if (added) this.emit({ type: 'notice', level: 'info', text: `MCP: ${added} external tool(s) available.` });
+    } catch (err) {
+      log.warn('MCP tools unavailable: ' + err.message);
+    }
+  }
+
   // -------------------------------------------------------------- loop ------
   async send(userText, { attachments = [] } = {}) {
     const store = getStore();
     this.loadHistory();
+    await this.attachMcpTools();
+    await fireHooks('SessionStart', { projectId: this.project.id, threadId: this.thread.id }, { emit: (e) => this.emit(e) });
 
     const text = String(userText || '').slice(0, 60_000);
     this.messages.push({ role: 'user', content: text });
@@ -501,6 +525,16 @@ export class AgentHarness {
         title: toolTitle(tool.name, args),
         readOnly: tool.readOnly,
       });
+
+      // PreToolUse hooks can veto a call; the model sees why.
+      const pre = await fireHooks('PreToolUse', { file: args.file_path || args.path || '', projectId: this.project.id, args }, { toolName: tool.name, emit: (e) => this.emit(e) });
+      if (pre.blocked) {
+        const blocked = `Error: blocked by a PreToolUse hook — ${pre.reason}`;
+        this.emit({ type: 'tool_end', toolCallId: call.id, name: tool.name, ok: false, summary: 'blocked by hook', durationMs: Date.now() - started });
+        results[index] = { id: call.id, name: tool.name, content: blocked, isError: true };
+        return;
+      }
+
       try {
         const out = await tool.run(args, {});
         const text = typeof out === 'string' ? out : out.text;
@@ -517,6 +551,7 @@ export class AgentHarness {
           truncated,
         });
         if (['write', 'edit', 'multiedit', 'notebook_edit'].includes(tool.name) && args.file_path) this.filesChanged.add(args.file_path);
+        await fireHooks('PostToolUse', { file: args.file_path || args.path || '', projectId: this.project.id, ok: !out.isError, output: text.slice(0, 2000) }, { toolName: tool.name, emit: (e) => this.emit(e) });
         results[index] = { id: call.id, name: tool.name, content: finalText, isError: Boolean(out.isError), display: out.display };
       } catch (err) {
         const message = err?.message || String(err);
@@ -819,5 +854,8 @@ export async function shutdownRuns() {
       bg.kill();
     } catch {}
   }
+  try {
+    shutdownMcp();
+  } catch {}
   await fsp.rm(path.join(config.dataDir, 'tmp'), { recursive: true, force: true }).catch(() => {});
 }

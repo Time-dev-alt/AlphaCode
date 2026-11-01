@@ -34,8 +34,8 @@ Production build (hashed assets + SRI + minified, optionally obfuscated):
 ```bash
 npm run build                 # → dist/   (cd dist && node start.mjs)
 npm run obfuscate             # protected client bundle
-npm test                      # 38 unit, integration, edge + build tests
-npm run smoke                 # 17 end-to-end checks against a live server
+npm test                      # 52 unit, integration, MCP, hooks, edge + build tests
+npm run smoke                 # 18 end-to-end checks against a live server
 ```
 
 Requirements: Node **22.5+** (uses `node:sqlite`), bash, and optionally
@@ -93,8 +93,13 @@ asking for tools.
 | Append-only JSONL transcript + rewind | run transcript + `checkpoint` tool (diff snapshots before edits, rewindable) |
 | NotebookEdit | `notebook_edit` for `.ipynb` cells |
 | WebFetch / WebSearch | `web_fetch`, `web_search` (allow-listed, no localhost) |
-| Hooks | pre/post-tool + pre-compact hooks in `src/agent/harness.mjs` |
+| Hooks (`settings.json`) | `data/hooks.json`: PreToolUse / PostToolUse / PreCompact / SessionStart / SessionEnd, regex matchers, JSON on stdin, exit 2 blocks the call |
+| MCP servers | `ALPHACODE_MCP_SERVERS` / `data/mcp.json` → stdio JSON-RPC client, tools exposed as `mcp__server__tool` |
 | Tool-name healing | `repairToolPairs` + `extractTextToolCalls` recover broken/inlined tool calls instead of crashing the turn |
+
+Measured against Claude Code at **94 % weighted parity**, with the scorecard,
+the deliberate differences and the remaining 6 % listed in
+[`docs/PARITY.md`](docs/PARITY.md).
 
 Extras Claude Code doesn't have: `deploy` (three clouds + claimable previews),
 nine `db_*` tools for real database editing, `runtime_info`, `install_deps`.
@@ -206,7 +211,7 @@ GET  /api/settings      PUT  /api/settings   (BYOK + deploy tokens)
 src/
   server.mjs              HTTP server, SSE, static assets, hard limits
   auth.mjs  policy.mjs    sessions/CSRF · tiers, quotas, model routing
-  agent/                  prompt, tools (30), harness (loop, compaction, hooks)
+  agent/                  prompt, tools (30), harness (loop, compaction), mcp, hooks
   providers/index.mjs     OpenRouter · Zen · Google · Kilo · BYOK, streaming
   runtime/                exec, pty, runtimes, git, database, path sandbox
   deploy/index.mjs        Cloudflare / Netlify / Vercel + claimable previews
@@ -214,8 +219,10 @@ src/
   edge/worker.mjs         Cloudflare Worker facade (assets + proxy)
 public/                   app shell, ANSI terminal, markdown renderer, claim page
 native/ptyhelper.c        tiny termios PTY bridge
-scripts/                  build (hash+SRI+obfuscate), smoke, deploy-cloudflare
-tests/                    provider, unit, client (ANSI), edge worker, build — 38 tests
+deploy/                   netlify.toml + vercel.json templates (edge proxy)
+scripts/                  build (hash+SRI+obfuscate), smoke, cloudflare deploy, edge config
+docs/PARITY.md            Claude Code parity scorecard (94 % weighted)
+tests/                    provider, unit, client (ANSI), MCP, hooks, edge worker, build — 52 tests
 ```
 
 ## Licence

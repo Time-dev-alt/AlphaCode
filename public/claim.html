@@ -44,7 +44,26 @@ const token = location.pathname.split('/').filter(Boolean).pop();
 const content = document.getElementById('content');
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+// Every mutating call needs the per-session CSRF token, exactly like the app.
+let csrf = '';
+async function ensureCsrf() {
+  if (csrf) return csrf;
+  try {
+    const res = await fetch('/api/bootstrap', { credentials: 'same-origin' });
+    if (res.ok) csrf = (await res.json()).csrf || '';
+  } catch {}
+  return csrf;
+}
+const post = (url, body) =>
+  fetch(url, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json', 'X-Alphacode-CSRF': csrf },
+    body: JSON.stringify(body || {}),
+  });
+
 async function load() {
+  await ensureCsrf();
   try {
     const res = await fetch(`/api/claim/${encodeURIComponent(token)}`, { credentials: 'same-origin' });
     const data = await res.json();
@@ -82,7 +101,8 @@ function render(data) {
   const status = content.querySelector('#status');
   const doClaim = async () => {
     status.textContent = 'Claiming…';
-    const res = await fetch(`/api/claim/${encodeURIComponent(token)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: '{}' });
+    await ensureCsrf();
+    const res = await post(`/api/claim/${encodeURIComponent(token)}`);
     const json = await res.json();
     if (!res.ok) {
       status.innerHTML = `<span style="color:var(--err)">${esc(json.error || 'Claim failed')}</span>`;
@@ -101,12 +121,8 @@ function render(data) {
   const password = content.querySelector('#password');
   const auth = async (path) => {
     status.textContent = 'Signing in…';
-    const res = await fetch(path, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'same-origin',
-      body: JSON.stringify({ email: email.value.trim(), password: password.value }),
-    });
+    await ensureCsrf();
+    const res = await post(path, { email: email.value.trim(), password: password.value });
     const json = await res.json().catch(() => ({}));
     if (!res.ok) {
       status.innerHTML = `<span style="color:var(--err)">${esc(json.error || 'Sign-in failed')}</span>`;

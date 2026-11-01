@@ -12,6 +12,9 @@ const state = {
   deploy: {},
   runtime: null,
   contextWindow: 200000,
+  capabilities: {},
+  instance: {},
+  lastUsage: null,
   activeToolId: '',
   projects: [],
   projectId: '',
@@ -92,6 +95,9 @@ async function boot() {
     state.providers = data.providers || {};
     state.deploy = data.deploy || {};
     state.runtime = data.runtime;
+    state.capabilities = data.capabilities || state.capabilities;
+    state.instance = { ...state.instance, ...(data.instance || {}), version: data.version || '2.0.0' };
+    state.limit = data.capabilities?.dailyRequests || state.limit;
     state.contextWindow = data.contextWindow || state.contextWindow;
     state.projects = data.projects || [];
     state.prefs = data.prefs || {};
@@ -690,7 +696,8 @@ function handleRunEvent(ev) {
     case 'provider_error':
       break;
     case 'usage': {
-      const used = ev.usage?.input || 0;
+      state.lastUsage = ev.usage || state.lastUsage;
+      const used = ev.usage?.inputTokens || ev.usage?.input || 0;
       const window = ev.usage?.contextWindow || state.contextWindow || 200000;
       const ctxPct = Math.max(0, Math.min(100, Math.round((used / window) * 100)));
       const meter = $('#ctx-meter');
@@ -1646,6 +1653,8 @@ const SLASH = [
   { cmd: '/rewind', desc: 'Open checkpoints' },
   { cmd: '/export', desc: 'Download the project' },
   { cmd: '/claim', desc: 'Claim a preview URL' },
+  { cmd: '/cost', desc: 'Usage, quota and token spend' },
+  { cmd: '/doctor', desc: 'Check runtime, providers and terminal health' },
 ];
 
 function renderSlashMenu(filter = '') {
@@ -1727,6 +1736,34 @@ async function handleSlash(text) {
         if (err.status === 401) openAuth('signin');
         else toast(err.message, 'err');
       }
+      return true;
+    }
+    case '/cost': {
+      const q = state.quota || {};
+      const rows = [
+        `- Tier: \`${q.tier || (state.guest ? 'guest' : 'member')}\``,
+        `- Requests today: ${q.unlimited ? 'unlimited (BYOK)' : `${q.used || 0} / ${q.limit ?? state.limit ?? 40}`}`,
+        `- Resets: ${q.resetsAt ? new Date(q.resetsAt).toLocaleString() : 'n/a'}`,
+        `- Context window: ${(state.contextWindow || 200000).toLocaleString()} tokens`,
+        `- Model calls this run: ${state.lastUsage?.calls ?? 0}`,
+        `- Tokens this run: ${(state.lastUsage?.input || 0).toLocaleString()} in / ${(state.lastUsage?.output || 0).toLocaleString()} out`,
+      ];
+      appendAssistantText(`**Cost & usage**\n\n${rows.join('\n')}`);
+      return true;
+    }
+    case '/doctor': {
+      const rt = state.runtime || {};
+      const rows = [
+        `- Server: ${state.instance?.version || '2.0.0'}${state.instance?.mock ? ' (demo provider)' : ''}`,
+        `- Node: ${rt.node?.version || rt.node || '?'}`,
+        `- npm: ${rt.npm?.version || rt.npm || '?'}`,
+        `- Python: ${rt.python?.version || rt.python || 'not installed'}`,
+        `- Shell: ${state.capabilities?.terminal ? 'PTY available' : 'PTY unavailable'}`,
+        `- Providers: ${Object.keys(state.providers || {}).join(', ') || 'none configured'}`,
+        `- Deploy: ${Object.entries(state.deploy || {}).map(([k, v]) => `${k}:${v.connected ? 'ready' : 'no token'}`).join(', ') || 'not checked'}`,
+        `- Guest floor: \`${state.capabilities?.guestModel || 'kilo/auto'}\``,
+      ];
+      appendAssistantText(`**Doctor**\n\n${rows.join('\n')}\n\nIf something looks wrong, run \`npm run smoke\` on the server.`);
       return true;
     }
     case '/init':

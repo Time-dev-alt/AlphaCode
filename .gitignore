@@ -1,0 +1,16 @@
+node_modules/
+data/
+workspaces/
+dist/
+.DS_Store
+*.log
+.env
+.env.*
+!.env.example
+*.db
+*.db-wal
+*.db-shm
+coverage/
+/tmp/
+.npm/
+.cache/

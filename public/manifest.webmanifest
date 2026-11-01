@@ -1,0 +1,12 @@
+{
+  "name": "AlphaCode — coding agent harness",
+  "short_name": "AlphaCode",
+  "description": "An agentic coding harness that reads, writes, runs, queries and deploys real code.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0b0f",
+  "theme_color": "#0a0b0f",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

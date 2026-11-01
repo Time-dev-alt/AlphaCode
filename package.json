@@ -1,0 +1,35 @@
+{
+  "name": "alphacode",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "AlphaCode — a real coding agent harness platform (agent loop, real shell, database editing, one-click deploys).",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/server.mjs",
+    "dev": "node --disable-warning=ExperimentalWarning --watch-path=src --watch-path=public src/server.mjs",
+    "build": "node scripts/build.mjs",
+    "obfuscate": "node scripts/build.mjs --obfuscate",
+    "test": "node --disable-warning=ExperimentalWarning --test \"tests/*.test.mjs\"",
+    "smoke": "node --disable-warning=ExperimentalWarning scripts/smoke.mjs",
+    "pty:build": "bash scripts/build-pty.sh",
+    "deploy:cloudflare": "node scripts/deploy-cloudflare.mjs",
+    "edge:config": "node scripts/render-edge-config.mjs",
+    "build:secure": "node scripts/build.mjs --obfuscate"
+  },
+  "optionalDependencies": {},
+  "keywords": [
+    "coding-agent",
+    "harness",
+    "cloudflare",
+    "vercel",
+    "netlify"
+  ],
+  "devDependencies": {
+    "javascript-obfuscator": "^4.2.2",
+    "wrangler": "^4.156.0"
+  }
+}

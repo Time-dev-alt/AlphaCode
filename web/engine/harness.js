@@ -7,6 +7,7 @@
  * memory, plan mode, compaction, subagents, checkpoints, stop/interrupt.
  */
 import { streamChat, planAttempts, PROVIDERS } from './providers.js';
+import { runHooks } from './hooks.js';
 import { buildTools, toolsForMode, toOpenAITools, summarize, toolTitle } from './tools.js';
 
 const MAX_ITERATIONS = 40;
@@ -312,6 +313,22 @@ ${this.plan ? `\n## Plan (approved)\n${this.plan}\n` : ''}${subagentType ? `\nYo
       runtimeInfo: () => this.runtimeInfo(),
       confirm: (req) => this.requestPermission(req),
       allowDeploy: this.allowDeploy !== false,
+      node: this.node || null,
+      jobs: this.jobs || null,
+      mcpTools: this.mcpTools || [],
+      snapshot: async () => {
+        const files = await this.fs.list(this.projectId);
+        const out = {};
+        for (const file of files.slice(0, 2000)) {
+          if (file.path.startsWith('node_modules/')) continue;
+          try {
+            out[file.path] = await this.fs.readText(this.projectId, file.path);
+          } catch {
+            /* binary */
+          }
+        }
+        return out;
+      },
     };
   }
 
@@ -363,9 +380,25 @@ ${this.plan ? `\n## Plan (approved)\n${this.plan}\n` : ''}${subagentType ? `\nYo
         results.push({ id: call.id, name: call.name, content: `Error: invalid arguments — ${e.message}`, isError: true });
         continue;
       }
-      this.emit({ type: 'tool_start', toolCallId: call.id, name: tool.name, args: sanitizeArgs(args), title: toolTitle(tool.name, args), readOnly: Boolean(tool.readOnly) });
       const started = Date.now();
-      const decision = await this.gate(tool, args);
+
+      // pre_tool hooks can block, rewrite arguments or auto-approve.
+      let hookApproved = false;
+      const notes = [];
+      if (this.hooks) {
+        const pre = await runHooks(this.hooks, 'pre_tool', { tool: tool.name, args, mode: this.mode, cwd: this.shell?.cwd || '' }, { onLog: (line) => this.emit({ type: 'hook', event: 'pre_tool', message: line }) });
+        if (pre.blocked) {
+          this.emit({ type: 'tool_end', toolCallId: call.id, name: tool.name, ok: false, summary: `blocked by hook: ${pre.blocked}`, durationMs: Date.now() - started });
+          results.push({ id: call.id, name: tool.name, content: `Error: a project hook blocked this call: ${pre.blocked}`, isError: true });
+          continue;
+        }
+        if (pre.args) args = { ...args, ...pre.args };
+        if (pre.approve) hookApproved = true;
+        if (pre.note) notes.push(pre.note);
+      }
+
+      this.emit({ type: 'tool_start', toolCallId: call.id, name: tool.name, args: sanitizeArgs(args), title: toolTitle(tool.name, args), readOnly: Boolean(tool.readOnly) });
+      const decision = hookApproved ? { approved: true, reason: 'hook' } : await this.gate(tool, args);
       if (!decision.approved) {
         this.emit({ type: 'tool_end', toolCallId: call.id, name: tool.name, ok: false, summary: decision.reason || 'denied', durationMs: Date.now() - started });
         results.push({ id: call.id, name: tool.name, content: `Error: the user denied this action${decision.reason ? ` (${decision.reason})` : ''}. Ask before retrying differently.`, isError: true });
@@ -374,6 +407,11 @@ ${this.plan ? `\n## Plan (approved)\n${this.plan}\n` : ''}${subagentType ? `\nYo
       try {
         const out = await tool.run(args);
         if (tool.name === 'write' || tool.name === 'edit' || tool.name === 'multiedit') this.filesChanged.add(args.file_path);
+        if (this.hooks?.post_tool) {
+          const post = await runHooks(this.hooks, 'post_tool', { tool: tool.name, args, result: out.text?.slice(0, 2000), isError: Boolean(out.isError) }, { onLog: (line) => this.emit({ type: 'hook', event: 'post_tool', message: line }) });
+          if (post.note) notes.push(post.note);
+        }
+        if (notes.length) out.text = `${out.text}\n\n[hooks] ${notes.join(' · ')}`;
         const summary = await summarize(tool, out);
         this.emit({ type: 'tool_end', toolCallId: call.id, name: tool.name, ok: !out.isError, summary, display: out.display || null, durationMs: Date.now() - started });
         results.push({ id: call.id, name: tool.name, content: out.text, isError: Boolean(out.isError), display: out.display });

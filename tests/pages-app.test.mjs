@@ -54,6 +54,16 @@ async function boot() {
   window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
   window.requestAnimationFrame = (fn) => setTimeout(() => fn(Date.now()), 0);
   window.HTMLElement.prototype.scrollTo = () => {};
+  window.Worker = class FakeWorker {
+    constructor() {
+      this.onmessage = null;
+      this.onerror = null;
+    }
+    postMessage(message) {
+      this.posted = message;
+    }
+    terminate() {}
+  };
 
   const code = fs.readFileSync(path.join(DIST, 'assets', fs.readdirSync(path.join(DIST, 'assets')).find((f) => f.startsWith('app.') && f.endsWith('.js'))), 'utf8');
   window.eval(code);
@@ -131,6 +141,79 @@ test('SQLite works in the page (WASM engine, project file)', { skip }, async () 
   await db.saveDatabase(app.state.fs, app.state.project.id, handle);
   assert.equal(handle.query('SELECT v FROM t').rows[0].v, 'hello');
   assert.ok((await app.state.fs.list(app.state.project.id)).some((f) => f.path === 'app.sqlite'));
+});
+
+test('the UI ships both layouts, templates and a live preview', { skip }, async () => {
+  const { window } = ctx;
+  const doc = window.document;
+  assert.equal(doc.querySelector('#app').dataset.layout, 'build');
+  assert.equal(doc.querySelectorAll('#layout-switch .switch-btn').length, 2);
+  doc.querySelector('[data-layout="code"]').click();
+  assert.equal(doc.querySelector('#app').dataset.layout, 'code');
+  doc.querySelector('[data-layout="build"]').click();
+  assert.equal(doc.querySelector('#app').dataset.layout, 'build');
+
+  assert.equal(doc.querySelectorAll('.template').length >= 5, true, 'template gallery rendered');
+  assert.ok(doc.querySelector('#preview-frame'), 'preview iframe exists');
+  assert.ok(doc.querySelector('#history-drawer'), 'history drawer exists');
+  assert.ok(doc.querySelector('#console-drawer'), 'console drawer exists');
+});
+
+test('the preview is rebuilt from project files with the picker and error hooks', { skip }, async () => {
+  const { window } = ctx;
+  const app = window.__alphacode;
+  const { refreshPreview } = await import('../web/app/workspace.js');
+  await refreshPreview({ force: true });
+  const frame = window.document.querySelector('#preview-frame');
+  assert.ok(frame.srcdoc.includes('<h1'), 'preview contains the generated page');
+  assert.match(frame.srcdoc, /__alpha:pick/, 'element picker is injected');
+  assert.match(frame.srcdoc, /unhandledrejection/, 'error capture is injected');
+
+  // a runtime error from the iframe shows up as an actionable console entry
+  window.postMessage({ __alpha: 1, type: 'error', message: 'boom is not defined', line: 12 }, '*');
+  window.dispatchEvent(new window.MessageEvent('message', { data: { __alpha: 1, type: 'error', message: 'boom is not defined', line: 12 } }));
+  await wait(30);
+  const drawer = window.document.querySelector('#console-drawer');
+  assert.equal(drawer.hidden, false);
+  assert.match(window.document.querySelector('#console-body').textContent, /boom is not defined/);
+  window.document.querySelector('#btn-fix-errors').click();
+  assert.match(window.document.querySelector('#prompt').value, /Fix the code/);
+});
+
+test('choosing a template reuses the empty project and starts a build', { skip }, async () => {
+  const { window } = ctx;
+  const app = window.__alphacode;
+  const before = app.state.projects.length;
+  window.document.querySelector('#btn-templates').click();
+  assert.equal(window.document.querySelector('#template-sheet').hidden, false);
+
+  const landing = [...window.document.querySelectorAll('.template')].find((card) => /Landing/.test(card.textContent));
+  landing.click();
+  await wait(1200);
+
+  assert.equal(window.document.querySelector('#template-sheet').hidden, true, 'picker closes');
+  assert.ok(app.state.projects.length <= before + 1, 'at most one project was created');
+  assert.match(app.state.project.name, /Landing/);
+  assert.match(window.document.querySelector('#prompt').value + window.document.querySelector('#transcript-inner').textContent, /Nimbus/, 'the starter prompt was sent');
+  const files = await app.state.fs.list(app.state.project.id);
+  assert.ok(files.some((f) => f.path.endsWith('.html')), 'the template produced files');
+});
+
+test('a checkpoint can be taken and restored from the history drawer', { skip }, async () => {
+  const { window } = ctx;
+  const app = window.__alphacode;
+  const projectId = app.state.project.id;
+  await app.state.fs.write(projectId, 'notes.txt', 'first draft');
+  await app.state.store.snapshot(projectId, await app.state.fs.snapshot(projectId), 'before experiment');
+
+  await app.state.fs.write(projectId, 'notes.txt', 'second draft');
+  window.document.querySelector('#btn-history').click();
+  await wait(60);
+  const entries = [...window.document.querySelectorAll('#history-list .snap')];
+  assert.ok(entries.length >= 1, 'the drawer lists checkpoints');
+  entries[0].querySelector('button').click();
+  await wait(200);
+  assert.equal(await app.state.fs.readText(projectId, 'notes.txt'), 'first draft', 'files were rewound');
 });
 
 test('deploy produces a claimed local preview without any account', { skip }, async () => {

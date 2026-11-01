@@ -505,3 +505,23 @@ test('checkpoints snapshot the workspace for rewind', async () => {
   assert.equal(await fsx.readText(harness.projectId, 'a.txt'), 'v1');
   assert.match(snap.text, /Checkpoint/);
 });
+
+test('messages keep their order even when written in parallel', async () => {
+  const store = new Store(new MemoryBackend());
+  const { thread } = await store.createProject({ name: 'ordering' });
+  // The harness writes the assistant message and its tool results in one tick.
+  await Promise.all([
+    store.addMessage(thread.id, 'user', { text: 'build a thing' }),
+    store.addMessage(thread.id, 'assistant', { text: 'on it' }),
+    store.addMessage(thread.id, 'assistant', { text: 'and this' }),
+  ]);
+  const first = await store.messages(thread.id);
+  const seqs = first.map((m) => m.seq);
+  assert.equal(new Set(seqs).size, seqs.length, 'no duplicate sequence numbers');
+  assert.equal(first[0].content.text, 'build a thing', 'the question stays first');
+  assert.equal(first.length, 3);
+  await store.addMessage(thread.id, 'tool', { name: 'write', content: 'ok', toolCallId: 'x' });
+  const second = await store.messages(thread.id);
+  assert.equal(second.at(-1).content.name, 'write');
+  assert.equal(second.length, 4);
+});

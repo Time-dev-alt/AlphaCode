@@ -19,7 +19,7 @@ import { JobManager } from '../engine/jobs.js';
 import { loadHooks } from '../engine/hooks.js';
 import { runWasi, compileC, canCompileC, RUNTIME_MATRIX } from '../engine/native.js';
 import { connectAll, contentToText } from '../engine/mcp.js';
-import { mountWorkspace, refreshPreview, renderJobs, renderHistory } from './workspace.js';
+import { mountWorkspace, refreshPreview, renderJobs, renderHistory, setLayout } from './workspace.js';
 import { zipSync, download } from '../engine/zip.js';
 import { TerminalView } from '../../public/assets/term.js';
 import { $, $$, el, icon, paintIcons, toast, md, renderDiff, timeAgo, bytes, escapeHtml, copyText, debounce } from './ui.js';
@@ -106,11 +106,223 @@ async function startFromTemplate(template) {
   if (template.prompt) {
     const prompt = $('#prompt');
     prompt.value = template.prompt;
+    prompt.dispatchEvent(new Event('input', { bubbles: true }));
     prompt.focus();
-    $('#btn-send').click();
+    send(template.prompt);
   } else {
     $('#prompt').focus();
   }
+}
+
+
+/* --------------------------------------------------------------- theme --- */
+
+const THEME_KEY = 'alphacode-theme';
+
+function currentTheme() {
+  return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+}
+
+function applyTheme(theme, { persist = true } = {}) {
+  document.documentElement.dataset.theme = theme;
+  const button = $('#btn-theme');
+  if (button) {
+    button.dataset.icon = theme === 'light' ? 'sun' : 'moon';
+    button.innerHTML = icon(theme === 'light' ? 'sun' : 'moon', 17);
+    button.title = theme === 'light' ? 'Switch to dark (⌘⇧L)' : 'Switch to light (⌘⇧L)';
+  }
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'light' ? '#fbfaf8' : '#0a0b0d');
+  if (persist) {
+    try {
+      localStorage.setItem(THEME_KEY, theme);
+    } catch {
+      /* private mode — the theme just will not persist */
+    }
+  }
+}
+
+const toggleTheme = () => applyTheme(currentTheme() === 'light' ? 'dark' : 'light');
+
+/* ---------------------------------------------------------- runtime panel --- */
+
+function renderRuntimePanel() {
+  const panel = $('#runtime-panel');
+  if (!panel) return;
+  const jobs = state.jobs?.list() || [];
+  const rows = [
+    ['server', 'Node runtime', state.node ? 'ready' : 'idle', Boolean(state.node), RUNTIME_MATRIX.node.how],
+    ['package', 'npm', state.node ? 'registry' : 'offline', Boolean(state.node), RUNTIME_MATRIX.npm.how],
+    ['cpu', 'Python', pythonReady() ? 'loaded' : 'on demand', RUNTIME_MATRIX.python.real, RUNTIME_MATRIX.python.how],
+    ['database', 'SQLite', 'wasm', true, 'sql.js in this tab'],
+    ['activity', 'Background jobs', `${jobs.length}`, jobs.length > 0, 'Web Workers with pids'],
+    ['link', 'MCP servers', `${state.mcp.clients.length}`, state.mcp.clients.length > 0, state.mcp.clients.map((c) => c.name).join(', ') || 'none connected'],
+    ['github', 'GitHub', state.github?.token ? 'connected' : 'not connected', Boolean(state.github?.token), 'OAuth, no tokens pasted'],
+  ];
+  panel.innerHTML = `
+    <h4>Runtime — all of it runs here</h4>
+    ${rows
+      .map(
+        ([glyph, name, status, on, desc]) => `<div class="runtime-row ${on ? 'on' : ''}">
+          <span style="color:var(--fg-3)">${icon(glyph, 14)}</span>
+          <span class="name">${escapeHtml(name)} <span class="desc">${escapeHtml(desc)}</span></span>
+          <span class="state">${escapeHtml(status)}</span>
+        </div>`,
+      )
+      .join('')}
+    <div class="runtime-foot"><button class="link" id="btn-runtime-settings">${icon('sliders', 13)} Runtime settings</button></div>`;
+  panel.querySelector('#btn-runtime-settings').onclick = () => {
+    panel.hidden = true;
+    openSettings();
+  };
+  panel.hidden = false;
+}
+
+/* ------------------------------------------------------------- palette ---- */
+
+function commands() {
+  const close = () => ($('#palette').hidden = true);
+  const go = (view) => () => {
+    setView(view);
+    close();
+  };
+  return [
+    { group: 'Workspace', name: 'New project', icon: 'plus', run: async () => { close(); $('#btn-new-project').click(); } },
+    { group: 'Workspace', name: 'Templates', icon: 'grid', sub: '⌘⇧T', run: async () => { close(); $('#template-sheet').hidden = false; } },
+    { group: 'Workspace', name: 'New session', icon: 'message', run: async () => { close(); $('#btn-new-session').click(); } },
+    { group: 'Workspace', name: 'Version history', icon: 'history', sub: '⌘⇧H', run: async () => { close(); $('#btn-history').click(); } },
+    { group: 'Workspace', name: 'Switch to Code mode', icon: 'terminal', sub: '⌘⇧2', run: async () => { close(); setLayout('code'); } },
+    { group: 'Workspace', name: 'Switch to Build mode', icon: 'wand', sub: '⌘⇧1', run: async () => { close(); setLayout('build'); } },
+    { group: 'Views', name: 'Chat', icon: 'message', run: go('chat') },
+    { group: 'Views', name: 'Files', icon: 'files', run: go('files') },
+    { group: 'Views', name: 'Terminal', icon: 'terminal', sub: '⌘J', run: go('terminal') },
+    { group: 'Views', name: 'Database', icon: 'database', run: go('db') },
+    { group: 'Views', name: 'Deploy', icon: 'rocket', run: go('deploy') },
+    { group: 'Actions', name: 'Send message', icon: 'arrow-up', sub: '⌘↵', run: async () => { close(); send($('#prompt').value); } },
+    { group: 'Actions', name: 'Attach a file', icon: 'paperclip', run: async () => { close(); $('#btn-attach').click(); } },
+    { group: 'Actions', name: 'Export project as ZIP', icon: 'download', run: async () => { close(); exportProject(); } },
+    { group: 'Actions', name: 'Toggle theme', icon: currentTheme() === 'light' ? 'moon' : 'sun', sub: '⌘⇧L', run: async () => { close(); toggleTheme(); } },
+    { group: 'Actions', name: 'Runtime status', icon: 'cpu', run: async () => { close(); renderRuntimePanel(); } },
+    { group: 'Actions', name: 'Settings', icon: 'sliders', run: async () => { close(); openSettings(); } },
+    { group: 'Assist', name: 'Explain this project', icon: 'files', run: async () => { close(); send('Read the project files and explain the structure, how it runs, and what to work on next. Be brief.'); } },
+    { group: 'Assist', name: 'Find and fix the preview errors', icon: 'bug', run: async () => { close(); $('#btn-fix-errors')?.click(); } },
+  ];
+}
+
+let paletteItems = [];
+let paletteIndex = 0;
+
+function renderPalette(query = '') {
+  const host = $('#palette-list');
+  const q = query.trim().toLowerCase();
+  const all = commands();
+  paletteItems = q ? all.filter((c) => `${c.name} ${c.group}`.toLowerCase().includes(q)) : all;
+  paletteIndex = Math.min(paletteIndex, Math.max(0, paletteItems.length - 1));
+  if (!paletteItems.length) {
+    host.innerHTML = `<div class="palette-group">Nothing matches “${escapeHtml(query)}”</div>`;
+    return;
+  }
+  let group = '';
+  host.innerHTML = paletteItems
+    .map((item, index) => {
+      const head = item.group !== group ? `<div class="palette-group">${item.group}</div>` : '';
+      group = item.group;
+      return `${head}<div class="palette-item ${index === paletteIndex ? 'active' : ''}" data-index="${index}">
+        ${icon(item.icon || 'dot', 15)}<span>${escapeHtml(item.name)}</span>${item.sub ? `<span class="sub">${item.sub}</span>` : ''}</div>`;
+    })
+    .join('');
+  host.querySelectorAll('[data-index]').forEach((node) => {
+    node.onclick = () => runPaletteItem(Number(node.dataset.index));
+    node.onmouseenter = () => {
+      paletteIndex = Number(node.dataset.index);
+      host.querySelectorAll('.palette-item').forEach((other) => other.classList.toggle('active', other === node));
+    };
+  });
+  host.querySelector('.palette-item.active')?.scrollIntoView({ block: 'nearest' });
+}
+
+function runPaletteItem(index) {
+  const item = paletteItems[index];
+  if (!item) return;
+  $('#palette').hidden = true;
+  item.run();
+}
+
+function openPalette() {
+  const modal = $('#palette');
+  if (!modal) return;
+  modal.hidden = false;
+  paletteIndex = 0;
+  const input = $('#palette-input');
+  input.value = '';
+  renderPalette('');
+  setTimeout(() => input.focus(), 20);
+}
+
+function wirePalette() {
+  const modal = $('#palette');
+  if (!modal) return;
+  modal.onclick = (event) => {
+    if (event.target.id === 'palette') modal.hidden = true;
+  };
+  const input = $('#palette-input');
+  input.oninput = () => renderPalette(input.value);
+  input.onkeydown = (event) => {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      paletteIndex = Math.min(paletteIndex + 1, paletteItems.length - 1);
+      renderPalette(input.value);
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      paletteIndex = Math.max(paletteIndex - 1, 0);
+      renderPalette(input.value);
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      runPaletteItem(paletteIndex);
+    } else if (event.key === 'Escape') {
+      modal.hidden = true;
+    }
+  };
+}
+
+/* ---------------------------------------------------------------- help ---- */
+
+function openShortcuts() {
+  $('#modal-title').textContent = 'Shortcuts';
+  $('#modal-body').innerHTML = `
+    <section>
+      <h3>Everywhere</h3>
+      <div class="shortcut-list">
+        ${[
+          ['⌘K', 'Command menu'],
+          ['⌘/ ', 'Focus the prompt'],
+          ['⌘↵', 'Send'],
+          ['Esc', 'Stop the agent / close panels'],
+          ['⇧Tab', 'Cycle permission mode'],
+          ['⌘⇧L', 'Light / dark'],
+          ['⌘⇧1 · ⌘⇧2', 'Build · Code'],
+          ['⌘⇧H', 'Version history'],
+          ['⌘⇧T', 'Templates'],
+        ]
+          .map(([key, what]) => `<div class="shortcut"><kbd>${key}</kbd><span>${what}</span></div>`)
+          .join('')}
+      </div>
+    </section>
+    <section>
+      <h3>In the terminal</h3>
+      <div class="shortcut-list">
+        ${[
+          ['node file.js', 'Run a module in the in-tab Node runtime'],
+          ['npm install x', 'Real packages, resolved at the edge'],
+          ['python file.py', 'CPython via Pyodide'],
+          ['sqlite3 db.sqlite "…"', 'Query a real database'],
+          ['cmd &', 'Run in the background'],
+          ['jobs · fg %1 · kill %1', 'List, attach, stop'],
+        ]
+          .map(([key, what]) => `<div class="shortcut"><kbd>${key}</kbd><span>${what}</span></div>`)
+          .join('')}
+      </div>
+    </section>`;
+  $('#modal').hidden = false;
 }
 
 /* ------------------------------------------------------------------ boot -- */
@@ -129,6 +341,7 @@ async function boot() {
   state.github = state.settings.github || null;
 
   wireGlobal();
+  if (state.settings.pane === 'preview-hidden') $('#app').dataset.pane = 'preview-hidden';
   await refreshProjects();
   const last = state.settings.lastProject;
   const projects = state.projects;
@@ -367,7 +580,9 @@ async function openProject(id) {
 async function openThread(id) {
   state.thread = (await state.store.thread(id)) || state.thread;
   state.messages = await state.store.messages(id);
-  renderTranscript();
+  // A run in flight owns the transcript; re-rendering from storage mid-stream
+  // would cut the streaming turn in half.
+  if (!state.running || state.thread?.id !== id) renderTranscript();
   await renderSessions();
 }
 
@@ -375,6 +590,7 @@ async function openThread(id) {
 
 function transInner() {
   let inner = $('#transcript-inner');
+  if (inner) inner.classList.toggle('is-empty', !state.messages.length);
   if (!inner) {
     const host = $('#transcript');
     host.innerHTML = '';
@@ -389,14 +605,32 @@ function renderWelcome() {
   const inner = transInner();
   if (inner.querySelector('.welcome')) return;
   const box = el('div', { class: 'welcome' });
+  const cards = [
+    ['wand', 'Landing page', 'Hero, features, pricing — live in the preview', 'Build a landing page for a product called Northwind. Hero with a gradient, three feature cards, a pricing section with three tiers, and a footer. Responsive and modern.'],
+    ['check-circle', 'Todo app', 'Interactive, saves to localStorage', 'Create a todo app with add, complete, delete and filter (all/active/done). Persist to localStorage, add a nice empty state and keyboard support.'],
+    ['database', 'SQLite schema', 'A real database you can query', 'Create a SQLite database for a small shop (products, orders, order_items) with seed data, then show me the tables and run a few queries.'],
+    ['files', 'Explain this project', 'Reads your workspace and writes a brief', 'Read the project files and write an ALPHACODE.md describing the structure, how to run it and the conventions used. Keep it under 40 lines.'],
+  ];
   box.innerHTML = `
-    <h1>What should we build?</h1>
-    <p class="lede">A coding agent that runs entirely in this tab — files in your browser, a real shell, SQLite, and deploys to <em>your</em> Cloudflare, Vercel or Netlify.</p>
-    <div class="cards">
-      <button data-prompt="Build a landing page for a product called Northwind, with a hero, features and a footer."><b>Landing page</b><span>Static site, instant preview</span></button>
-      <button data-prompt="Create a todo app with localStorage persistence and a clean dark UI."><b>Todo app</b><span>Interactive, no backend</span></button>
-      <button data-prompt="Create a SQLite database for a small shop (products, orders, order_items) with seed data, and query it."><b>SQLite schema</b><span>Real database, in the browser</span></button>
-      <button data-prompt="Look at the project files and write an ALPHACODE.md describing the structure and how to run it."><b>Explain the project</b><span>Reads your workspace</span></button>
+    <div class="welcome-eyebrow"><span class="dot ok"></span><span>AlphaCode · running in this tab</span></div>
+    <h1 class="welcome-title">What should we <em>build</em>?</h1>
+    <p class="welcome-lede">Describe an app in plain words. It gets written, previewed live, and you can keep nudging it until it feels right — <b>files, npm, Python and SQLite all run in your browser</b>, so nothing you type leaves this tab.</p>
+    <div class="prompt-cards">
+      ${cards
+        .map(
+          ([glyph, title, sub, prompt]) => `<button class="prompt-card" data-prompt="${escapeHtml(prompt)}">
+            <span class="pc-icon">${icon(glyph, 15)}</span>
+            <span><span class="pc-title">${escapeHtml(title)}</span><span class="pc-sub">${escapeHtml(sub)}</span></span>
+            <span class="pc-arrow">${icon('arrow-right', 14)}</span>
+          </button>`,
+        )
+        .join('')}
+    </div>
+    <div class="welcome-foot">
+      <span><span class="dot ok"></span>node + npm</span>
+      <span><span class="dot ok"></span>cpython</span>
+      <span><span class="dot ok"></span>sqlite</span>
+      <span><span class="dot ok"></span>${escapeHtml(state.storage === 'memory' ? 'temporary storage' : 'files persist here')}</span>
     </div>`;
   for (const b of box.querySelectorAll('[data-prompt]')) b.onclick = () => send(b.dataset.prompt);
   inner.append(box);
@@ -413,6 +647,7 @@ function renderTranscript() {
   const host = $('#transcript');
   host.innerHTML = '';
   const inner = el('div', { class: 'transcript-inner', id: 'transcript-inner' });
+  inner.classList.toggle('is-empty', !state.messages.length);
   host.append(inner);
   if (!state.messages.length) {
     renderWelcome();
@@ -440,6 +675,7 @@ function scrollTranscript(force) {
 
 function appendUser(text) {
   const inner = transInner();
+  inner.classList.remove('is-empty');
   inner.querySelector('.welcome')?.remove();
   inner.append(el('div', { class: 'msg user', html: `<div class="bubble">${escapeHtml(text).replace(/\n/g, '<br>')}</div>` }));
   scrollTranscript(true);
@@ -450,9 +686,10 @@ function ensureTurn() {
   if (state.turn) return state.turn;
   const wrap = el('div', { class: 'turn' });
   const meta = el('div', { class: 'turn-meta' });
-  meta.innerHTML = `<span class="dot live"></span><span class="turn-model">thinking…</span>`;
+  meta.innerHTML = `<span class="dot live"></span><span class="turn-model">thinking</span>`;
   const body = el('div', { class: 'turn-body' });
   const reasoning = el('details', { class: 'reasoning', html: '<summary>reasoning</summary><p></p>' });
+  reasoning.hidden = true;
   const tools = el('div', { class: 'turn-tools' });
   wrap.append(meta, reasoning, body, tools);
   inner.append(wrap);
@@ -470,14 +707,52 @@ function appendAssistant(text) {
   scrollTranscript();
 }
 
+const TOOL_LABEL = {
+  write: 'Write',
+  read: 'Read',
+  edit: 'Edit',
+  multi_edit: 'Edit',
+  bash: 'Shell',
+  shell: 'Shell',
+  glob: 'Find files',
+  grep: 'Search',
+  list: 'List',
+  todo_write: 'Plan',
+  deploy: 'Deploy',
+  npm_install: 'npm install',
+  job_start: 'Background',
+  job_output: 'Background',
+  job_kill: 'Background',
+  web_fetch: 'Fetch',
+  db_query: 'SQL',
+  db_schema: 'SQL',
+  subagent: 'Subagent',
+};
+
+const toolLabel = (name) => TOOL_LABEL[name] || (name.startsWith('mcp__') ? name.split('__')[1] === undefined ? 'MCP' : 'MCP' : name);
+
 function appendTool({ name, title, args }) {
   const turn = state.turn || state.lastTurn;
   const host = turn?.tools || transInner();
   const card = el('div', { class: 'tool' });
-  card.innerHTML = `<div class="tool-head"><span class="tool-name">${escapeHtml(name)}</span>
-    <span class="tool-title">${escapeHtml(title || args?.command || args?.file_path || args?.pattern || '')}</span>
-    <span class="grow"></span><span class="tool-sum"></span></div>
+  const detail = title || args?.command || args?.file_path || args?.path || args?.pattern || args?.query || '';
+  card.innerHTML = `<div class="tool-head" title="${escapeHtml(name)}" role="button" tabindex="0">
+    <span class="tool-name">${escapeHtml(toolLabel(name))}</span>
+    <span class="tool-title">${escapeHtml(detail)}</span>
+    <span class="grow"></span><span class="tool-sum"></span><span class="tool-caret">${icon('chevron-down', 12)}</span></div>
     <div class="tool-body" hidden></div>`;
+  const body = card.querySelector('.tool-body');
+  card.querySelector('.tool-head').onclick = () => {
+    if (!body.textContent.trim() && body.hidden) return;
+    body.hidden = !body.hidden;
+    card.classList.toggle('open', !body.hidden);
+  };
+  card.querySelector('.tool-head').onkeydown = (event) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      card.querySelector('.tool-head').click();
+    }
+  };
   host.append(card);
   card._out = '';
   scrollTranscript();
@@ -498,15 +773,22 @@ function finishTool(card, { ok, summary, display, output }) {
   if (!card) return;
   card.classList.toggle('ok', ok !== false);
   card.classList.toggle('err', ok === false);
-  card.querySelector('.tool-sum').textContent = summary || '';
+  const summaryNode = card.querySelector('.tool-sum');
+  if (summaryNode) summaryNode.textContent = summary || '';
   const body = card.querySelector('.tool-body');
+  if (!body) return;
   if (display?.kind === 'diff' && display.diff) {
-    body.hidden = false;
     body.innerHTML = renderDiff(display.diff);
   } else if (output && !card._out) {
-    body.hidden = false;
     body.textContent = String(output).slice(0, 4000);
   }
+  // Once a tool has finished, only the interesting ones stay open. A 60-line
+  // diff left expanded turns the conversation into a wall of colour; the summary
+  // in the header already says what happened, and one click brings it back.
+  const lines = (body.textContent || '').split('\n').length;
+  const interesting = ok === false || lines <= 6 || card.classList.contains('open');
+  body.hidden = !interesting;
+  card.classList.toggle('open', interesting);
 }
 
 function appendNotice(text, kind = 'info') {
@@ -547,6 +829,7 @@ async function send(text) {
   appendUser(text);
   $('#prompt').value = '';
   autoGrow();
+  syncSendState();
   setRunning(true);
 
   const run = new Run({ id: uid('run_', 5), threadId: state.thread.id, projectId: state.project.id, mode: state.mode, model: state.model });
@@ -631,11 +914,14 @@ function handleEvent(ev) {
       if (state.turn) {
         state.turn.body.innerHTML = md(ev.text || state.turn.text);
         state.turn.rendered = ev.text || state.turn.text;
+        const model = state.turn.meta.querySelector('.turn-model');
+        if (model) model.textContent = state.model.split('/').pop();
       }
       break;
     case 'reasoning': {
       const turn = ensureTurn();
       turn.reasoning.hidden = false;
+      turn.hasReasoning = true;
       turn.reasoning.querySelector('p').textContent = (turn.reasoning.querySelector('p').textContent + ev.text).slice(-2000);
       break;
     }
@@ -676,9 +962,14 @@ function handleEvent(ev) {
     case 'notice':
       appendNotice(ev.text, ev.level === 'warn' ? 'warn' : 'info');
       break;
-    case 'provider_error':
-      appendNotice(`${PROVIDERS[ev.provider]?.label || ev.provider}: ${ev.message}`, 'warn');
+    case 'provider_error': {
+      // A turn can try three free routers before the demo model answers. Showing
+      // three stack traces to someone who just typed "build me a shop" is noise,
+      // so they are buffered into one line once the turn actually produces output.
+      state.providerErrors = state.providerErrors || [];
+      state.providerErrors.push({ provider: PROVIDERS[ev.provider]?.label || ev.provider, message: ev.message });
       break;
+    }
     case 'usage': {
       state.lastUsage = ev.usage;
       const pct = Math.min(100, Math.round(((ev.usage?.input || 0) / (ev.usage?.contextWindow || 200_000)) * 100));
@@ -698,14 +989,25 @@ function handleEvent(ev) {
       appendNotice(`Subagent finished: ${ev.description} (${ev.steps} steps)`, 'info');
       break;
     case 'done': {
+      flushProviderErrors();
       const turn = state.turn;
       if (turn) {
         if (!turn.text.trim() && !turn.tools.childElementCount) turn.body.innerHTML = '<p class="muted">(no output)</p>';
+        const meta = turn.meta;
+        const label = meta.querySelector('.turn-model');
+        if (label) label.textContent = state.model.split('/').pop();
+        meta.querySelector('.dot')?.classList.remove('live');
+        if (!turn.hasReasoning) turn.reasoning.remove();
         const stats = el('div', { class: 'turn-stats' });
         const u = ev.usage || {};
         stats.textContent = `${ev.steps || 0} model calls · ${(u.input || 0).toLocaleString()} in / ${(u.output || 0).toLocaleString()} out${ev.filesChanged?.length ? ` · ${ev.filesChanged.length} files touched` : ''}${ev.finishReason === 'stopped' ? ' · stopped' : ''}`;
         turn.wrap.append(stats);
         turn.meta.querySelector('.dot')?.classList.remove('live');
+      }
+      if (state.turn && !state.turn.text.trim() && !state.turn.tools.childElementCount) {
+        // A tool-only turn with nothing in it (a stopped run, or a provider that
+        // returned no text) should not leave a ghost bubble behind.
+        state.turn.wrap.remove();
       }
       state.lastTurn = state.turn;
       state.turn = null;
@@ -723,6 +1025,25 @@ function handleEvent(ev) {
   scrollTranscript();
 }
 
+/**
+ * One calm line instead of one warning per router.
+ */
+function flushProviderErrors() {
+  const errors = state.providerErrors || [];
+  state.providerErrors = [];
+  if (!errors.length) return;
+  const demo = state.settings.demo !== false;
+  const names = [...new Set(errors.map((e) => e.provider))];
+  if (errors.length === 1) {
+    appendNotice(`${names[0]} could not be reached — ${demo ? 'the offline demo model answered instead. Add your own key in Settings → Model access.' : 'check your key in Settings → Model access.'}`, 'warn');
+    return;
+  }
+  appendNotice(
+    `${names.length} free routers were unreachable from this browser (a network or CORS block — not your code). ${demo ? 'The offline demo model answered instead.' : ''} Add a provider key in Settings → Model access for real models.`,
+    'warn',
+  );
+}
+
 const onTextFlush = debounce(() => {
   if (state.turn) state.turn.body.innerHTML = md(state.turn.text);
   scrollTranscript();
@@ -735,7 +1056,7 @@ function renderTodos(todos) {
     transInner().append(box);
   }
   box.innerHTML = `<h5>Plan</h5>${todos
-    .map((t) => `<div class="todo ${t.status}"><span class="mark">${t.status === 'completed' ? icon('check', 12) : t.status === 'in_progress' ? icon('play', 10) : '○'}</span>${escapeHtml(t.content)}</div>`)
+    .map((t) => `<div class="todo ${t.status}"><span class="mark">${t.status === 'completed' ? icon('check', 10) : t.status === 'in_progress' ? icon('play', 8) : ''}</span>${escapeHtml(t.content)}</div>`)
     .join('')}`;
 }
 
@@ -743,7 +1064,9 @@ function setRunning(running) {
   state.running = running;
   $('#btn-send').hidden = running;
   $('#btn-stop').hidden = !running;
+  $('#app').dataset.running = running ? '1' : '0';
   $('#status-dot').className = `dot ${running ? 'live' : 'ok'}`;
+  syncSendState();
   if (running) {
     setStatus('working…');
     state.turn = null;
@@ -758,14 +1081,26 @@ function setStatus(text) {
 
 /* ----------------------------------------------------------------- files --- */
 
+const flattenTree = (nodes, depth = 0, out = []) => {
+  for (const node of nodes) {
+    out.push({ ...node, depth });
+    if (node.children) flattenTree(node.children, depth + 1, out);
+  }
+  return out;
+};
+
 async function refreshFiles() {
   if (!state.project) return;
-  state.files = await state.fs.tree(state.project.id);
+  state.tree = await state.fs.tree(state.project.id);
+  state.files = flattenTree(state.tree);
   renderTree();
+  const fileCount = state.files.filter((f) => !f.dir).length;
+  const tabCount = $('#tab-file-count');
+  if (tabCount) tabCount.textContent = fileCount || '';
   if (state.previewTimer) clearTimeout(state.previewTimer);
   state.previewTimer = setTimeout(() => refreshPreview(), 250);
   const where = STORAGE_LABEL[state.storage] || 'in this browser';
-  const count = state.files.filter((f) => !f.dir).length;
+  const count = fileCount;
   $('#storage-note').textContent =
     state.storage === 'memory' ? `${count} files · temporary (storage blocked — export before closing)` : `${count} files · ${where}`;
   $('#storage-note').title = state.storage === 'memory'
@@ -1025,10 +1360,12 @@ async function renderDeployments() {
 
 function renderGithub() {
   const connected = Boolean(state.github?.token);
-  $('#chip-github').hidden = !connected;
-  if (connected) $('#chip-github-txt').textContent = state.github.login || 'github';
-  $('#github-state').textContent = connected ? `connected as ${state.github.login || 'you'}` : 'not connected';
-  $('#btn-connect-github').textContent = connected ? 'Reconnect GitHub' : 'Connect GitHub';
+  const stateNode = $('#github-state');
+  if (stateNode) stateNode.textContent = connected ? `connected as ${state.github.login || 'you'}` : 'not connected';
+  const button = $('#btn-connect-github');
+  if (button) {
+    button.innerHTML = `${icon(connected ? 'check-circle' : 'github', 14)}${connected ? 'Reconnect GitHub' : 'Connect GitHub'}`;
+  }
 }
 
 async function claimPreview(deployment) {
@@ -1073,6 +1410,23 @@ function openSettings() {
     .join('');
 
   body.innerHTML = `
+    <section>
+      <h3>Appearance</h3>
+      <p class="hint">Everything about the workspace is stored in this browser, including how it looks.</p>
+      <div class="field"><label>Theme</label>
+        <div class="row">
+          <button class="btn ${currentTheme() === 'dark' ? 'primary' : ''}" data-theme-set="dark" data-icon="moon" data-icon-size="14">Dark</button>
+          <button class="btn ${currentTheme() === 'light' ? 'primary' : ''}" data-theme-set="light" data-icon="sun" data-icon-size="14">Light</button>
+        </div>
+      </div>
+      <div class="field"><label>Layout</label>
+        <div class="row">
+          <button class="btn ${state.settings.layout === 'code' ? '' : 'primary'}" data-layout-set="build">Build — chat and a big preview</button>
+          <button class="btn ${state.settings.layout === 'code' ? 'primary' : ''}" data-layout-set="code">Code — files, terminal, a narrow preview</button>
+        </div>
+      </div>
+    </section>
+
     <section>
       <h3>Model access</h3>
       <p class="hint">Requests go from this browser straight to the provider. Keys are stored only in this browser's IndexedDB — there is no AlphaCode server to leak them.</p>
@@ -1166,6 +1520,18 @@ function openSettings() {
   $('#modal').hidden = false;
   paintIcons(body);
 
+  body.querySelectorAll('[data-theme-set]').forEach((button) => {
+    button.onclick = () => {
+      applyTheme(button.dataset.themeSet);
+      body.querySelectorAll('[data-theme-set]').forEach((other) => other.classList.toggle('primary', other === button));
+    };
+  });
+  body.querySelectorAll('[data-layout-set]').forEach((button) => {
+    button.onclick = () => {
+      setLayout(button.dataset.layoutSet);
+      body.querySelectorAll('[data-layout-set]').forEach((other) => other.classList.toggle('primary', other === button));
+    };
+  });
   $('#set-cc').onchange = async (e) => {
     state.settings = await state.store.saveSettings({ cCompilerEndpoint: e.target.value.trim() });
   };
@@ -1302,15 +1668,33 @@ function setView(view) {
   closeDrawer();
 }
 
+const MODE_INFO = {
+  default: ['default', 'Asks before shell commands and deletes'],
+  'accept-edits': ['accept edits', 'Writes files without asking'],
+  plan: ['plan', 'Read-only — proposes instead of changing'],
+  bypass: ['bypass', 'Never asks. Use with care'],
+};
+
 function renderChrome() {
-  $('#chip-model-txt').textContent = state.model.split('/').pop();
-  $('#btn-model').textContent = `model: ${state.model.split('/').pop()}`;
-  $('#btn-mode').textContent = `mode: ${state.mode}`;
-  const ready = ['node', 'python', 'npm'].filter((name) => RUNTIME_MATRIX[name]?.real);
-  const chip = $('#chip-runtime-txt');
-  if (chip) chip.textContent = `${ready.join(' · ')} · in-tab`;
-  const chipEl = $('#chip-runtime');
-  if (chipEl) chipEl.title = ready.map((name) => `${name}: ${RUNTIME_MATRIX[name].how}`).join('\n');
+  const modelName = state.model.split('/').pop();
+  const chip = $('#chip-model-txt');
+  if (chip) chip.textContent = modelName;
+  const modelBtn = $('#btn-model');
+  if (modelBtn) modelBtn.title = `Model: ${state.model} — click to change`;
+  const [modeName, modeHint] = MODE_INFO[state.mode] || MODE_INFO.default;
+  const label = $('#mode-label');
+  if (label) label.textContent = modeName;
+  const modeBtn = $('#btn-mode');
+  if (modeBtn) {
+    modeBtn.title = `${modeHint} — ⇧Tab to cycle`;
+    modeBtn.classList.toggle('warn', state.mode === 'bypass');
+  }
+  const hint = $('#status-hint');
+  if (hint) {
+    const ready = ['node', 'python', 'npm'].filter((name) => RUNTIME_MATRIX[name]?.real);
+    hint.textContent = `${ready.length} runtimes`;
+    hint.title = ready.map((name) => `${name} — ${RUNTIME_MATRIX[name].how}`).join('\n');
+  }
   renderGithub();
 }
 
@@ -1452,6 +1836,14 @@ function autoGrow() {
   const ta = $('#prompt');
   ta.style.height = 'auto';
   ta.style.height = `${Math.min(220, ta.scrollHeight)}px`;
+  syncSendState();
+}
+
+/** The send button is only "on" when there is something to send. */
+function syncSendState() {
+  const button = $('#btn-send');
+  const prompt = $('#prompt');
+  if (button) button.disabled = state.running || !prompt?.value.trim();
 }
 
 const MODES = ['default', 'accept-edits', 'plan', 'bypass'];
@@ -1472,6 +1864,7 @@ function wireGlobal() {
   ta.addEventListener('input', () => {
     autoGrow();
     renderSlashMenu();
+    syncSendState();
   });
   ta.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
@@ -1480,9 +1873,51 @@ function wireGlobal() {
     }
   });
   document.addEventListener('keydown', (e) => {
+    const meta = e.metaKey || e.ctrlKey;
     if (e.key === 'Escape') {
+      if (!$('#palette').hidden) {
+        $('#palette').hidden = true;
+        return;
+      }
       if (state.running) state.run?.stop();
       $('#modal').hidden = true;
+      $('#template-sheet').hidden = true;
+      $('#runtime-panel').hidden = true;
+    }
+    if (meta && e.key.toLowerCase() === 'k') {
+      e.preventDefault();
+      openPalette();
+      return;
+    }
+    if (meta && e.key === '/') {
+      e.preventDefault();
+      $('#prompt').focus();
+      return;
+    }
+    if (meta && e.shiftKey && (e.key === '1' || e.key === '2')) {
+      e.preventDefault();
+      setLayout(e.key === '1' ? 'build' : 'code');
+      return;
+    }
+    if (meta && e.shiftKey && e.key.toLowerCase() === 'l') {
+      e.preventDefault();
+      toggleTheme();
+      return;
+    }
+    if (meta && e.shiftKey && e.key.toLowerCase() === 'h') {
+      e.preventDefault();
+      $('#btn-history').click();
+      return;
+    }
+    if (meta && e.shiftKey && e.key.toLowerCase() === 't') {
+      e.preventDefault();
+      $('#template-sheet').hidden = false;
+      return;
+    }
+    if (meta && e.key.toLowerCase() === 'j') {
+      e.preventDefault();
+      setView('terminal');
+      return;
     }
     if (e.key === 'Tab' && e.shiftKey) {
       e.preventDefault();
@@ -1519,6 +1954,36 @@ function wireGlobal() {
     $('#project-name').textContent = state.project.name;
     toast('Renamed', 'ok');
   };
+  $('#btn-theme').onclick = () => toggleTheme();
+  $('#btn-theme-m').onclick = () => toggleTheme();
+  $('#btn-history-m').onclick = () => $('#btn-history').click();
+  $('#btn-settings-m').onclick = () => {
+    $('#sidebar').classList.remove('open');
+    $('#scrim').hidden = true;
+    openSettings();
+  };
+  $('#btn-command').onclick = () => openPalette();
+  $('#btn-help').onclick = () => openShortcuts();
+  $('#status-pill').onclick = (event) => {
+    event.stopPropagation();
+    const panel = $('#runtime-panel');
+    if (panel.hidden) renderRuntimePanel();
+    else panel.hidden = true;
+  };
+  document.addEventListener('click', (event) => {
+    const panel = $('#runtime-panel');
+    if (!panel.hidden && !panel.contains(event.target) && !event.target.closest('#status-pill')) panel.hidden = true;
+  });
+  $('#btn-preview-collapse').onclick = () => {
+    const app = $('#app');
+    const hidden = app.dataset.pane === 'preview-hidden';
+    app.dataset.pane = hidden ? 'preview' : 'preview-hidden';
+    $('#btn-preview-collapse').title = hidden ? 'Hide the preview' : 'Show the preview';
+    state.store.saveSettings({ pane: app.dataset.pane });
+  };
+  $('#btn-empty-template').onclick = () => ($('#template-sheet').hidden = false);
+  wirePalette();
+  applyTheme(currentTheme(), { persist: false });
   $('#btn-close-modal').onclick = () => ($('#modal').hidden = true);
   $('#modal').onclick = (e) => {
     if (e.target.id === 'modal') $('#modal').hidden = true;

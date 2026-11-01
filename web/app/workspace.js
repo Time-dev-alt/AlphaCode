@@ -47,10 +47,11 @@ export function setLayout(layout, { silent = false } = {}) {
     button.classList.toggle('active', active);
     button.setAttribute('aria-selected', String(active));
   }
-  if (layout === 'code') {
-    // Code mode opens the terminal once, because that is why you switched.
-    if (api.getState?.().view === 'chat' && api.setView) api.setView('chat');
-  }
+  // The mode decides which surface is in front: Build is the conversation,
+  // Code is the workspace. Remembering the view is more useful than resetting it.
+  const view = api.getState?.().view;
+  if (layout === 'code' && view === 'chat' && api.setView) api.setView('files');
+  if (layout === 'build' && view !== 'chat' && view !== 'deploy' && api.setView) api.setView('chat');
   if (!silent) api.saveSettings?.({ layout });
   window.dispatchEvent(new window.CustomEvent('alphacode:layout', { detail: layout }));
 }
@@ -58,10 +59,11 @@ export function setLayout(layout, { silent = false } = {}) {
 /* ---------------------------------------------------------------- preview -- */
 
 function bindPreviewBar() {
-  for (const button of $$('.device')) {
+  for (const button of $$('[data-device]')) {
     button.onclick = () => setDevice(button.dataset.device);
   }
-  $('#btn-preview-refresh').onclick = () => refreshPreview({ force: true });
+  const refresh = $('#btn-preview-refresh');
+  if (refresh) refresh.onclick = () => refreshPreview({ force: true });
   $('#btn-preview-open').onclick = () => {
     if (!previewState.lastHtml) {
       uiToast('Nothing to open yet — ask for something first', 'warn');
@@ -73,9 +75,12 @@ function bindPreviewBar() {
     setTimeout(() => URL.revokeObjectURL(url), 60_000);
   };
   $('#btn-pick').onclick = () => togglePicker();
-  $('#btn-preview').onclick = () => refreshPreview({ force: true });
-  $('#btn-publish').onclick = () => api.onPublish?.();
-  $('#btn-publish-top').onclick = () => api.onPublish?.();
+  const rebuild = $('#btn-preview');
+  if (rebuild) rebuild.onclick = () => refreshPreview({ force: true });
+  for (const id of ['#btn-publish', '#btn-publish-top']) {
+    const button = $(id);
+    if (button) button.onclick = () => api.onPublish?.();
+  }
 
   window.addEventListener('message', onPreviewMessage);
 }
@@ -83,7 +88,11 @@ function bindPreviewBar() {
 export function setDevice(device) {
   previewState.device = device;
   $('#preview-stage').dataset.device = device;
-  for (const button of $$('.device')) button.classList.toggle('active', button.dataset.device === device);
+  for (const button of $$('[data-device]')) {
+    const active = button.dataset.device === device;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  }
 }
 
 function togglePicker(force) {
@@ -137,8 +146,11 @@ export async function refreshPreview({ force = false } = {}) {
     frame.srcdoc = injectHarness(html);
     frame.hidden = false;
     empty.hidden = true;
+    const slug = api.getState().project.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'app';
     const title = $('#preview-title');
-    if (title) title.textContent = api.getState().project.name.toLowerCase().replace(/\s+/g, '-');
+    if (title) title.textContent = slug;
+    const url = document.querySelector('#frame-url');
+    if (url) url.textContent = `${slug}.local`;
     $('#status-dot')?.classList.remove('busy');
   } catch (err) {
     frame.hidden = true;
@@ -166,10 +178,9 @@ function onPreviewMessage(event) {
     const describe = `In ${data.selector || data.tag}, change: `;
     const prompt = $('#prompt');
     if (prompt) {
-      prompt.value = describe;
+      setPrompt(prompt, describe);
       prompt.focus();
       prompt.setSelectionRange(prompt.value.length, prompt.value.length);
-      autoGrow(prompt);
     }
     previewState.lastPick = data;
     api.toast?.(`Selected ${data.tag}${data.selector ? ` · ${data.selector}` : ''}`, 'info');
@@ -209,11 +220,17 @@ function bindConsole() {
     if (!previewState.errors.length) return;
     const list = previewState.errors.map((e, i) => `${i + 1}. ${e.message}${e.stack ? `\n${e.stack.split('\n').slice(0, 3).join('\n')}` : ''}`).join('\n');
     const prompt = $('#prompt');
-    prompt.value = `The preview is showing these errors. Fix the code so it works:\n\n${list}`;
-    autoGrow(prompt);
+    setPrompt(prompt, `The preview is showing these errors. Fix the code so it works:\n\n${list}`);
     prompt.focus();
     api.toast?.('Errors added to the prompt — press Send', 'warn');
   };
+}
+
+/** Fill the composer the way a keystroke would, so every listener stays honest. */
+function setPrompt(node, text) {
+  node.value = text;
+  node.dispatchEvent(new Event('input', { bubbles: true }));
+  autoGrow(node);
 }
 
 function autoGrow(node) {
@@ -354,8 +371,7 @@ function bindSuggestions() {
   for (const button of $$('#suggestions button')) {
     button.onclick = () => {
       const prompt = $('#prompt');
-      prompt.value = button.dataset.suggest;
-      autoGrow(prompt);
+      setPrompt(prompt, button.dataset.suggest);
       prompt.focus();
     };
   }
@@ -382,8 +398,7 @@ async function pickAttachment() {
     const text = await file.text().catch(() => '');
     const prompt = $('#prompt');
     const preview = text.length > 4000 ? `${text.slice(0, 4000)}\n… [truncated]` : text;
-    prompt.value = `${prompt.value}\n\n--- ${file.name} ---\n${preview}`.trim();
-    autoGrow(prompt);
+    setPrompt(prompt, `${prompt.value}\n\n--- ${file.name} ---\n${preview}`.trim());
     prompt.focus();
     api.toast?.(`Attached ${file.name}`, 'ok');
   };

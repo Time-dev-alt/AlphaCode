@@ -130,6 +130,26 @@ async function main() {
     if (fs.existsSync(from)) await fsp.copyFile(from, path.join(DIST, file));
   }
 
+  // ---- fonts -----------------------------------------------------------
+  // Self-hosted so the app never waits on a CDN and works offline. Three
+  // woff2 files, latin subset: UI (Geist), code (Geist Mono) and the editorial
+  // serif used for hero moments (Instrument Serif italic).
+  const FONTS = [
+    ['@fontsource-variable/geist', 'geist-latin-wght-normal.woff2', 'geist.woff2'],
+    ['@fontsource-variable/geist-mono', 'geist-mono-latin-wght-normal.woff2', 'geist-mono.woff2'],
+    ['@fontsource/instrument-serif', 'instrument-serif-latin-400-italic.woff2', 'instrument-serif-italic.woff2'],
+  ];
+  await fsp.mkdir(path.join(DIST, 'assets', 'fonts'), { recursive: true });
+  for (const [pkg, file, name] of FONTS) {
+    const from = path.join(ROOT, 'node_modules', pkg, 'files', file);
+    if (!fs.existsSync(from)) {
+      log(`warning: ${pkg} is not installed — the UI falls back to system fonts`);
+      continue;
+    }
+    await fsp.copyFile(from, path.join(DIST, 'assets', 'fonts', name));
+  }
+  log(`assets/fonts/ (${FONTS.length} files, self-hosted)`);
+
   // ---- sqlite wasm -----------------------------------------------------
   const wasmCandidates = [
     path.join(ROOT, 'node_modules', 'sql.js', 'dist', 'sql-wasm.wasm'),

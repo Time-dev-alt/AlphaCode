@@ -5,6 +5,30 @@ coding agent in one — and it runs *entirely* in your browser. The agent loop,
 filesystem, shell, **real Node + npm**, **real CPython**, SQLite and the live
 preview all execute in the tab. Your files never leave it.
 
+### The workspace
+
+Two modes over the same agent, decided by who you are rather than what the app can do:
+
+**Build** is the default: a conversation on the left, your app rendered live on the
+right inside a browser frame you can resize to phone, tablet or desktop. You can
+click any element in the preview and the composer fills in "in `.hero h1`, change:".
+Runtime errors collect in a drawer with one button — *Fix with AI* — and every turn
+is checkpointed so you can rewind.
+
+**Code** is the same project with the IDE in front: file tree and editor, a real
+terminal (`node`, `npm install`, `python`, `sqlite3`, `cmd &`), the SQLite browser,
+and the preview narrowed to a column.
+
+Both share one design system: one warm accent (`#ffb02e`) against near-black, Geist
+for UI text, Geist Mono for anything a machine produced, Instrument Serif italic for
+the two places we want a human voice (the empty state and section headings). Type
+sizes, radii, borders and shadows come from tokens, so the app stays coherent as it
+grows. `⌘K` opens everything; `⌘⇧L` flips the theme; `⌘⇧1`/`⌘⇧2` switch modes.
+
+Read it as a product decision: the *content* is the brightest thing on screen. Chrome
+is hairline borders and muted labels; your app, your words and the send button are
+what the eye lands on.
+
 Two ways to use it, one product:
 
 | **Build** mode | **Code** mode |

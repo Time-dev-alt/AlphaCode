@@ -453,11 +453,64 @@ export function buildTools(ctx) {
     },
   ];
 
+  /* ---- packages, background processes, MCP, the browser runtime ---------- */
+
+  if (ctx.node) {
+    tools.push({
+      name: 'npm_install',
+      description:
+        'Install npm packages into the project (real packages, resolved at the edge and extracted in the tab). Use before importing a library instead of pasting a CDN script tag.',
+      schema: { type: 'object', properties: { packages: { type: 'array', items: { type: 'string' } }, dev: { type: 'boolean' } }, required: ['packages'] },
+      async run({ packages = [], dev = false }) {
+        const resolved = dev ? packages.map((p) => `${p} --save-dev`) : packages;
+        const result = await ctx.node.npmInstall({ add: resolved, log: (line) => emit?.({ type: 'tool_output', text: line }) });
+        return { text: truncate(result.output), isError: result.code !== 0, display: { kind: 'npm', packages } };
+      },
+    });
+    tools.push({
+      name: 'job_start',
+      description:
+        'Start a background process (a real Web Worker) that keeps running while you work. Use for dev servers, watchers and long tasks. Returns a job id.',
+      schema: { type: 'object', properties: { file: { type: 'string' }, command: { type: 'string' } }, required: ['file'] },
+      async run({ file, command }) {
+        if (!ctx.jobs) return err('background jobs are not available in this session');
+        const job = ctx.jobs.start({ command: command || `node ${file}`, file, files: await ctx.snapshot?.() });
+        return ok(`started job %${job.id}: ${job.command}
+Use job_output %${job.id} to read the log, job_kill %${job.id} to stop it.`, { kind: 'job', job: ctx.jobs.describe(job) });
+      },
+    });
+    tools.push({
+      name: 'job_output',
+      description: 'Read the log of a background job (and its status).',
+      schema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+      async run({ id }) {
+        if (!ctx.jobs) return err('background jobs are not available');
+        const job = ctx.jobs.get(id);
+        if (!job) return err(`no job %${id}`);
+        const state = ctx.jobs.describe(job);
+        return ok(`%${job.id} ${state.status} (${(state.durationMs / 1000).toFixed(1)}s)\n${job.log.slice(-8000) || '(no output yet)'}`, { kind: 'job', job: state });
+      },
+    });
+    tools.push({
+      name: 'job_kill',
+      description: 'Stop a background job.',
+      schema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+      async run({ id }) {
+        if (!ctx.jobs) return err('background jobs are not available');
+        return ctx.jobs.kill(id) ? ok(`stopped %${String(id).replace('%', '')}`) : err(`no job %${id}`);
+      },
+    });
+  }
+
+  // MCP tools are injected by the harness as `mcp__server__tool`, so the agent
+  // can use any connected server without a special code path.
+  if (Array.isArray(ctx.mcpTools)) tools.push(...ctx.mcpTools);
+
   if (ctx.allowDeploy === false) return tools.filter((t) => t.name !== 'deploy');
   return tools;
 }
 
-const READ_ONLY_TOOLS = new Set(['read', 'glob', 'grep', 'ls', 'web_fetch', 'db_list', 'db_schema', 'db_query', 'db_rows', 'runtime_info', 'todo_write', 'checkpoint', 'exit_plan_mode']);
+const READ_ONLY_TOOLS = new Set(['read', 'glob', 'grep', 'ls', 'web_fetch', 'job_output', 'db_list', 'db_schema', 'db_query', 'db_rows', 'runtime_info', 'todo_write', 'checkpoint', 'exit_plan_mode']);
 
 export function toolsForMode(tools, mode, subagentType) {
   let list = tools;
@@ -489,6 +542,13 @@ export function toolTitle(name, args = {}) {
       return args.description || '';
     case 'deploy':
       return args.target || 'preview';
+    case 'npm_install':
+      return (args.packages || []).join(' ');
+    case 'job_start':
+      return args.command || args.file || '';
+    case 'job_output':
+    case 'job_kill':
+      return `%${String(args.id || '').replace('%', '')}`;
     default:
       return '';
   }

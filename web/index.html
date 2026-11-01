@@ -3,150 +3,255 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>AlphaCode — the coding agent that runs in your browser</title>
-<meta name="description" content="A real coding agent harness in your browser. Files, shell, SQLite and deploys — all client-side, all yours.">
-<meta name="theme-color" content="#0a0b0f" media="(prefers-color-scheme: dark)">
-<meta name="theme-color" content="#faf9f7" media="(prefers-color-scheme: light)">
+<title>AlphaCode — describe it, watch it build</title>
+<meta name="description" content="An AI app builder and coding agent that runs entirely in your browser. Real files, real npm, real SQLite, real deploys — nothing leaves the tab.">
+<meta name="theme-color" content="#08090d" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f7f6f3" media="(prefers-color-scheme: light)">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/assets/app.css">
 </head>
 <body>
-<div class="app" id="app">
+<div class="app" id="app" data-layout="build">
+  <!-- ───────────────────────────── top bar ───────────────────────────── -->
   <header class="topbar">
-    <button class="icon-btn" id="btn-menu" aria-label="Toggle sidebar" data-icon="menu"></button>
+    <button class="icon-btn only-mobile" id="btn-menu" aria-label="Menu" data-icon="menu"></button>
     <a class="brand" href="/" data-icon="logo" aria-label="AlphaCode"></a>
-    <div class="chips">
-      <span class="chip" id="chip-runtime" title="Everything runs in this tab"><span data-icon="cpu"></span><span id="chip-runtime-txt">browser</span></span>
-      <span class="chip" id="chip-model" title="Current model"><span data-icon="spark"></span><span id="chip-model-txt">kilo/auto</span></span>
-      <span class="chip" id="chip-github" title="GitHub connection" hidden><span data-icon="github"></span><span id="chip-github-txt">—</span></span>
+
+    <div class="switch" id="layout-switch" role="tablist" aria-label="Workspace mode">
+      <button class="switch-btn active" data-layout="build" role="tab" aria-selected="true"><span data-icon="wand"></span>Build</button>
+      <button class="switch-btn" data-layout="code" role="tab" aria-selected="false"><span data-icon="terminal"></span>Code</button>
     </div>
+
+    <div class="project-pill" id="project-pill" title="Current project">
+      <span data-icon="folder"></span><span id="project-name">My first app</span>
+      <button class="icon-btn xs" id="btn-rename-project" title="Rename" data-icon="pencil"></button>
+    </div>
+
     <div class="grow"></div>
+
+    <div class="chips">
+      <span class="chip" id="chip-model" title="Model in use"><span data-icon="spark"></span><span id="chip-model-txt">kilo/auto</span></span>
+      <span class="chip ghost" id="chip-runtime" title="All runtimes execute in this tab"><span data-icon="cpu"></span><span id="chip-runtime-txt">in-tab</span></span>
+      <span class="chip ghost" id="chip-github" title="GitHub" hidden><span data-icon="github"></span><span id="chip-github-txt">—</span></span>
+    </div>
     <span class="status"><span class="dot ok" id="status-dot"></span><span id="status-text">ready</span></span>
-    <button class="btn sm" id="btn-settings" data-icon="gear">Settings</button>
+    <button class="icon-btn" id="btn-history" title="Version history" data-icon="history"></button>
+    <button class="icon-btn" id="btn-settings" title="Settings" data-icon="gear"></button>
+    <button class="btn primary sm" id="btn-publish-top" data-icon="rocket">Publish</button>
   </header>
 
+  <!-- ───────────────────────────── sidebar ───────────────────────────── -->
+  <div class="scrim" id="scrim" hidden></div>
   <aside class="sidebar" id="sidebar">
     <div class="side-head">
       <h2>Projects</h2>
       <button class="icon-btn sm" id="btn-new-project" title="New project" data-icon="plus"></button>
     </div>
     <div class="side-list" id="project-list"></div>
+
+    <button class="btn soft block" id="btn-templates" data-icon="grid">Start from a template</button>
+
     <div class="side-head">
       <h2>Sessions</h2>
       <button class="icon-btn sm" id="btn-new-session" title="New session" data-icon="plus"></button>
     </div>
     <div class="side-list" id="session-list"></div>
+
     <div class="side-foot">
-      <div class="mini" id="storage-note">Files stay in this browser.</div>
+      <div class="storage">
+        <span class="mini" id="storage-note">Files stay in this browser.</span>
+        <button class="link" id="btn-export" data-icon="download">Export</button>
+      </div>
     </div>
   </aside>
 
-  <main class="main" id="main">
-    <div class="tabs" role="tablist">
-      <button class="tab active" data-view="chat" role="tab" data-icon="chat">Chat</button>
-      <button class="tab" data-view="files" role="tab" data-icon="file">Files</button>
-      <button class="tab" data-view="terminal" role="tab" data-icon="terminal">Terminal</button>
-      <button class="tab" data-view="db" role="tab" data-icon="database">Database</button>
-      <button class="tab" data-view="deploy" role="tab" data-icon="rocket">Deploy</button>
-      <div class="grow"></div>
-      <button class="btn sm ghost" id="btn-export" data-icon="download" title="Download the project as a zip">Export</button>
-      <button class="btn sm ghost" id="btn-preview" data-icon="eye" title="Open a local preview">Preview</button>
-    </div>
+  <!-- ───────────────────────────── workspace ─────────────────────────── -->
+  <main class="workspace" id="main">
+    <section class="chat-col">
+      <nav class="tabs" role="tablist">
+        <button class="tab active" data-view="chat" role="tab"><span data-icon="chat"></span>Chat</button>
+        <button class="tab code-only" data-view="files" role="tab"><span data-icon="file"></span>Files</button>
+        <button class="tab code-only" data-view="terminal" role="tab"><span data-icon="terminal"></span>Terminal</button>
+        <button class="tab code-only" data-view="db" role="tab"><span data-icon="database"></span>Database</button>
+        <button class="tab" data-view="deploy" role="tab"><span data-icon="rocket"></span>Deploy</button>
+        <div class="grow"></div>
+        <button class="icon-btn sm" id="btn-preview" title="Rebuild preview" data-icon="refresh"></button>
+      </nav>
 
-    <!-- chat -->
-    <section class="view active" id="view-chat">
-      <div class="transcript" id="transcript" aria-live="polite"><div class="transcript-inner" id="transcript-inner"></div></div>
-      <div class="composer-wrap">
-        <div class="mode-row">
-          <button class="pill" id="btn-mode" title="Permission mode (⇧Tab)">mode: default</button>
-          <button class="pill" id="btn-model">model: kilo/auto</button>
-          <span class="hint" id="ctx-meter" title="Context usage">0%</span>
-          <div class="grow"></div>
-          <button class="pill" id="btn-stop" hidden>Stop</button>
-        </div>
-        <div class="composer">
-          <textarea id="prompt" rows="1" placeholder="Describe what to build…  /  for commands"></textarea>
-          <button class="btn primary" id="btn-send" data-icon="send">Send</button>
-        </div>
-        <div class="slash-menu" id="slash-menu" hidden></div>
-      </div>
-    </section>
-
-    <!-- files -->
-    <section class="view" id="view-files">
-      <div class="split">
-        <div class="pane narrow">
-          <div class="pane-head"><span>Workspace</span><button class="icon-btn sm" id="btn-refresh-files" data-icon="refresh" title="Refresh"></button></div>
-          <div class="tree" id="file-tree"></div>
-        </div>
-        <div class="pane">
-          <div class="pane-head"><span id="editor-path">No file selected</span><div class="grow"></div>
-            <button class="btn sm" id="btn-save-file" hidden>Save</button>
+      <!-- chat -->
+      <section class="view active" id="view-chat">
+        <div class="transcript" id="transcript" aria-live="polite"><div class="transcript-inner" id="transcript-inner"></div></div>
+        <div class="todo-box" id="todo-box" hidden></div>
+        <div class="composer-wrap">
+          <div class="mode-row">
+            <button class="pill" id="btn-mode" title="Permission mode (⇧Tab)">default</button>
+            <button class="pill" id="btn-model">kilo/auto</button>
+            <span class="hint" id="ctx-meter" title="Context usage">0%</span>
+            <div class="grow"></div>
+            <button class="pill danger" id="btn-stop" hidden data-icon="stop">Stop</button>
           </div>
-          <textarea class="editor" id="editor" spellcheck="false" placeholder="Select a file to edit…"></textarea>
-        </div>
-      </div>
-    </section>
-
-    <!-- terminal -->
-    <section class="view" id="view-terminal">
-      <div class="term-host" id="term-host"></div>
-      <div class="hint term-hint">A real shell over your project files — <code>ls</code>, <code>cat</code>, <code>grep</code>, <code>node</code>, <code>sqlite3</code>, <code>python</code>. Type <code>help</code>.</div>
-    </section>
-
-    <!-- database -->
-    <section class="view" id="view-db">
-      <div class="split">
-        <div class="pane narrow">
-          <div class="pane-head"><span>Databases</span><button class="icon-btn sm" id="btn-new-db" data-icon="plus" title="New database"></button></div>
-          <div class="list" id="db-list"></div>
-        </div>
-        <div class="pane">
-          <div class="pane-head"><span id="db-path">No database</span><div class="grow"></div><span class="hint" id="db-status"></span></div>
-          <div class="editor-wrap"><textarea class="editor sql" id="db-sql" spellcheck="false" placeholder="SELECT * FROM users;">SELECT name FROM sqlite_master WHERE type='table';</textarea></div>
-          <div class="row">
-            <button class="btn sm" id="btn-db-run" data-icon="play">Run</button>
-            <button class="btn sm" id="btn-db-schema" data-icon="list">Schema</button>
-            <span class="hint">Read-only queries and writes both persist to the file.</span>
+          <div class="composer">
+            <textarea id="prompt" rows="1" placeholder="Describe the app you want — or ask for a change…"></textarea>
+            <div class="composer-actions">
+              <button class="icon-btn sm" id="btn-attach" title="Attach a file" data-icon="paperclip"></button>
+              <button class="btn primary" id="btn-send" data-icon="send">Send</button>
+            </div>
           </div>
-          <div class="db-result" id="db-result"></div>
+          <div class="slash-menu" id="slash-menu" hidden></div>
+          <div class="suggestions" id="suggestions">
+            <button data-suggest="Make the hero section more dramatic, with a gradient and big type">Make the hero dramatic</button>
+            <button data-suggest="Add a pricing section with three tiers">Add pricing</button>
+            <button data-suggest="Make it fully responsive and fix any layout issues on mobile">Fix mobile layout</button>
+            <button data-suggest="Add a working contact form that saves to the database">Add a form</button>
+          </div>
         </div>
-      </div>
+      </section>
+
+      <!-- files -->
+      <section class="view" id="view-files">
+        <div class="split">
+          <div class="pane narrow">
+            <div class="pane-head"><span>Workspace</span><button class="icon-btn sm" id="btn-refresh-files" data-icon="refresh" title="Refresh"></button></div>
+            <div class="tree" id="file-tree"></div>
+          </div>
+          <div class="pane">
+            <div class="pane-head"><span id="editor-path">No file selected</span><div class="grow"></div>
+              <button class="btn sm" id="btn-save-file" hidden>Save</button>
+            </div>
+            <textarea class="editor" id="editor" spellcheck="false" placeholder="Select a file to edit…"></textarea>
+          </div>
+        </div>
+      </section>
+
+      <!-- terminal -->
+      <section class="view" id="view-terminal">
+        <div class="term-host" id="term-host"></div>
+        <div class="hint term-hint">
+          Real shell over your files. <code>node</code>, <code>npm install</code>, <code>python</code>, <code>pip</code>,
+          <code>sqlite3</code>, <code>wasm</code>, <code>jobs</code>, and <code>cmd &amp;</code> for background processes.
+        </div>
+      </section>
+
+      <!-- database -->
+      <section class="view" id="view-db">
+        <div class="split">
+          <div class="pane narrow">
+            <div class="pane-head"><span>Databases</span><button class="icon-btn sm" id="btn-new-db" data-icon="plus" title="New database"></button></div>
+            <div class="list" id="db-list"></div>
+          </div>
+          <div class="pane">
+            <div class="pane-head"><span id="db-path">No database</span><div class="grow"></div><span class="hint" id="db-status"></span></div>
+            <div class="editor-wrap"><textarea class="editor sql" id="db-sql" spellcheck="false" placeholder="SELECT * FROM users;">SELECT name FROM sqlite_master WHERE type='table';</textarea></div>
+            <div class="row">
+              <button class="btn sm" id="btn-db-run" data-icon="play">Run</button>
+              <button class="btn sm" id="btn-db-schema" data-icon="list">Schema</button>
+              <span class="hint">Reads and writes both persist to the file.</span>
+            </div>
+            <div class="db-result" id="db-result"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- deploy -->
+      <section class="view" id="view-deploy">
+        <div class="deploy-grid">
+          <article class="card lift">
+            <div class="card-icon" data-icon="eye"></div>
+            <h3>Instant preview</h3>
+            <p>Bundle the project into one self-contained page. No account, no build, no waiting.</p>
+            <button class="btn primary" id="btn-deploy-preview" data-icon="bolt">Create preview</button>
+          </article>
+          <article class="card lift">
+            <div class="card-icon" data-icon="github"></div>
+            <h3>Your GitHub</h3>
+            <p>One click, OAuth, no token to paste. AlphaCode pushes the project to <em>your</em> repo.</p>
+            <button class="btn" id="btn-connect-github" data-icon="github">Connect GitHub</button>
+            <div class="hint" id="github-state">not connected</div>
+          </article>
+          <article class="card lift">
+            <div class="card-icon" data-icon="cloud"></div>
+            <h3>Your host</h3>
+            <p>The provider imports your repo and builds on your account. We host nothing.</p>
+            <div class="row">
+              <button class="btn" data-deploy="cloudflare" data-icon="cloud">Cloudflare</button>
+              <button class="btn" data-deploy="vercel" data-icon="triangle">Vercel</button>
+              <button class="btn" data-deploy="netlify" data-icon="diamond">Netlify</button>
+            </div>
+          </article>
+        </div>
+        <h3 class="section-title">Deployments</h3>
+        <div class="list" id="deploy-list"></div>
+      </section>
     </section>
 
-    <!-- deploy -->
-    <section class="view" id="view-deploy">
-      <div class="deploy-grid">
-        <article class="card">
-          <h3>1 · Preview (no account)</h3>
-          <p>Bundle the project into one self-contained page and open it. Save the link to keep it in this browser.</p>
-          <button class="btn primary" id="btn-deploy-preview" data-icon="eye">Create preview</button>
-        </article>
-        <article class="card">
-          <h3>2 · Your GitHub</h3>
-          <p>Connect GitHub with one click (OAuth). AlphaCode pushes the project to <em>your</em> repository — no token to paste.</p>
-          <button class="btn" id="btn-connect-github" data-icon="github">Connect GitHub</button>
-          <div class="hint" id="github-state">not connected</div>
-        </article>
-        <article class="card">
-          <h3>3 · Your host</h3>
-          <p>Pick where it should live. The provider imports your repo and builds it on your account.</p>
-          <div class="row">
-            <button class="btn" data-deploy="cloudflare" data-icon="cloud">Cloudflare</button>
-            <button class="btn" data-deploy="vercel" data-icon="triangle">Vercel</button>
-            <button class="btn" data-deploy="netlify" data-icon="diamond">Netlify</button>
-          </div>
-          <div class="hint">We host nothing: the build and the bill are on your account, and the site is yours.</div>
-        </article>
+    <!-- ───────────────────────── live preview ───────────────────────── -->
+    <section class="preview-col" id="preview-col" aria-label="Live preview">
+      <div class="preview-bar">
+        <div class="devices" role="group" aria-label="Device size">
+          <button class="device active" data-device="desktop" title="Desktop" data-icon="monitor"></button>
+          <button class="device" data-device="tablet" title="Tablet" data-icon="tablet"></button>
+          <button class="device" data-device="mobile" title="Mobile" data-icon="phone"></button>
+        </div>
+        <div class="address" title="This preview is generated in your tab">
+          <span class="dot ok"></span>
+          <span id="preview-title">preview</span>
+        </div>
+        <div class="grow"></div>
+        <button class="icon-btn sm" id="btn-pick" title="Click an element to describe a change" data-icon="cursor"></button>
+        <button class="icon-btn sm" id="btn-preview-refresh" title="Refresh preview" data-icon="refresh"></button>
+        <button class="icon-btn sm" id="btn-preview-open" title="Open in a new tab" data-icon="external"></button>
+        <button class="btn primary sm" id="btn-publish" data-icon="rocket">Publish</button>
       </div>
-      <h3 class="section-title">Deployments</h3>
-      <div class="list" id="deploy-list"></div>
+
+      <div class="preview-stage" id="preview-stage">
+        <div class="device-frame" id="device-frame">
+          <iframe id="preview-frame" title="Project preview" sandbox="allow-scripts allow-forms allow-modals allow-popups"></iframe>
+          <div class="preview-empty" id="preview-empty">
+            <div class="skeleton" aria-hidden="true">
+              <div class="sk sk-title"></div><div class="sk sk-line"></div><div class="sk sk-line short"></div>
+              <div class="sk-row"><div class="sk sk-card"></div><div class="sk sk-card"></div><div class="sk sk-card"></div></div>
+            </div>
+            <p class="hint">Ask for something and it appears here, live.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="console-drawer" id="console-drawer" hidden>
+        <header><span data-icon="alert"></span><strong id="console-count">No issues</strong><div class="grow"></div>
+          <button class="btn sm" id="btn-fix-errors" data-icon="wand">Fix with AI</button>
+          <button class="icon-btn xs" id="btn-console-close" data-icon="close"></button>
+        </header>
+        <pre id="console-body"></pre>
+      </div>
+
+      <div class="job-strip" id="job-strip" hidden></div>
     </section>
   </main>
 </div>
 
-<!-- settings modal -->
+<!-- ───────────────────────────── templates ───────────────────────────── -->
+<div class="sheet" id="template-sheet" hidden>
+  <div class="sheet-card wide">
+    <header>
+      <div>
+        <h2>What are we building?</h2>
+        <p class="hint">Pick a starting point, or start blank and describe it.</p>
+      </div>
+      <button class="icon-btn" id="btn-close-templates" data-icon="close" aria-label="Close"></button>
+    </header>
+    <div class="template-grid" id="template-grid"></div>
+  </div>
+</div>
+
+<!-- ───────────────────────────── history ───────────────────────────── -->
+<aside class="drawer" id="history-drawer" hidden aria-label="Version history">
+  <header><h2>Version history</h2><button class="icon-btn sm" id="btn-close-history" data-icon="close"></button></header>
+  <div class="drawer-body" id="history-list"></div>
+  <footer><button class="btn block" id="btn-checkpoint" data-icon="camera">Save a checkpoint now</button></footer>
+</aside>
+
+<!-- ───────────────────────────── settings ───────────────────────────── -->
 <div class="modal" id="modal" hidden>
   <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
     <header><h2 id="modal-title">Settings</h2><button class="icon-btn" id="btn-close-modal" data-icon="close" aria-label="Close"></button></header>

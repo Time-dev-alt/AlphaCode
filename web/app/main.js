@@ -13,6 +13,13 @@ import { openDatabase, saveDatabase, dbFiles, loadEngine } from '../engine/db.js
 import { createPreview, connectGitHub, deployProject, whoAmI, publishToGitHub, importUrl, DEPLOY_TARGETS } from '../engine/deploy.js';
 import { Harness, Run } from '../engine/harness.js';
 import { FREE_MODELS, PROVIDERS, GUEST_MODEL } from '../engine/providers.js';
+import { runPython, pipInstall, loadPython, pythonReady } from '../engine/python.js';
+import { createNodeSession } from '../engine/node/session.js';
+import { JobManager } from '../engine/jobs.js';
+import { loadHooks } from '../engine/hooks.js';
+import { runWasi, compileC, canCompileC, RUNTIME_MATRIX } from '../engine/native.js';
+import { connectAll, contentToText } from '../engine/mcp.js';
+import { mountWorkspace, refreshPreview, renderJobs, renderHistory } from './workspace.js';
 import { zipSync, download } from '../engine/zip.js';
 import { TerminalView } from '../../public/assets/term.js';
 import { $, $$, el, icon, paintIcons, toast, md, renderDiff, timeAgo, bytes, escapeHtml, copyText, debounce } from './ui.js';
@@ -45,7 +52,66 @@ const state = {
   deployments: [],
   pendingClaim: '',
   bootedAt: Date.now(),
+  node: null,
+  jobs: null,
+  mcp: { clients: [], tools: [], errors: [] },
+  hooks: null,
 };
+
+
+/* --------------------------------------------------------------- MCP / runtime -- */
+
+/** Connect configured MCP servers and expose their tools to the harness. */
+async function loadMcp() {
+  const configs = state.settings.mcp || [];
+  if (!configs.length) {
+    state.mcp = { clients: [], tools: [], errors: [] };
+    return state.mcp;
+  }
+  setStatus('connecting MCP servers…');
+  const { clients, errors } = await connectAll(configs, { onLog: (line) => toast(line, errors.length ? 'warn' : 'info') });
+  const tools = clients.flatMap(({ client, tools: list }) =>
+    list.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      readOnly: false,
+      schema: tool.inputSchema,
+      async run(args) {
+        const result = await client.callTool(tool.rawName, args);
+        return { text: contentToText(result.content), display: { kind: 'mcp', server: tool.server } };
+      },
+    })),
+  );
+  state.mcp = { clients: clients.map((c) => c.client), tools, errors };
+  setStatus('ready');
+  return state.mcp;
+}
+
+/** Create a project from a template and, if it has one, run its starter prompt. */
+async function startFromTemplate(template) {
+  // Reuse the current project when it is still untouched (the common case right
+  // after opening the app), so a template never leaves an empty project behind.
+  const current = state.project;
+  const existing = current ? await state.fs.list(current.id).catch(() => []) : [];
+  const project = current && existing.length === 0 ? current : await createProject(template.name, { silent: true });
+  if (project === current) {
+    state.project = await state.store.updateProject(current.id, { name: template.name }).catch(() => current);
+    $('#project-name').textContent = template.name;
+    await refreshProjects();
+  }
+  for (const [path, content] of Object.entries(template.files || {})) await state.fs.write(project.id, path, content);
+  await refreshFiles();
+  refreshPreview({ force: true });
+  toast(`Started “${template.name}”`, 'ok');
+  if (template.prompt) {
+    const prompt = $('#prompt');
+    prompt.value = template.prompt;
+    prompt.focus();
+    $('#btn-send').click();
+  } else {
+    $('#prompt').focus();
+  }
+}
 
 /* ------------------------------------------------------------------ boot -- */
 
@@ -73,6 +139,39 @@ async function boot() {
   }
   if (projects.length) await openProject(projects.find((p) => p.id === last)?.id || projects[0].id);
   else await createProject('My first app', { silent: true });
+  state.jobs = new JobManager({
+    spawnWorker: () => new Worker(__WORKER_URL__, { type: 'module' }),
+    writeFile: (path, content) => state.fs.write(state.project.id, path, content),
+    snapshot: () => state.fs.snapshot(state.project.id),
+    onEvent: (event) => {
+      if (event.type === 'job_start' || event.type === 'job_end') {
+        renderJobs(state.jobs.list().map((job) => state.jobs.describe(job)));
+        toast(event.type === 'job_start' ? `Started %${event.job.id} in the background` : `%${event.job.id} ${event.job.status}`, event.type === 'job_start' ? 'info' : 'ok');
+      }
+    },
+  });
+  if (state.shell) {
+    state.shell.jobs = state.jobs;
+    state.shell.node = state.node;
+  }
+  mountWorkspace({
+    getState: () => state,
+    saveSettings: async (patch) => {
+      state.settings = await state.store.saveSettings(patch);
+      return state.settings;
+    },
+    toast,
+    setView,
+    refreshFiles,
+    onSend: () => $('#btn-send').click(),
+    onPublish: () => {
+      setView('deploy');
+      $('#modal').hidden = true;
+    },
+    onTemplate: async (template) => {
+      await startFromTemplate(template);
+    },
+  });
   setStatus('ready');
   renderChrome();
   if (!state.settings.seenWelcome) {
@@ -131,13 +230,23 @@ async function renderSessions() {
   }
 }
 
-async function createProject(name, { silent } = {}) {
+async function createProject(name, { silent, files = null } = {}) {
   const { project, thread } = await state.store.createProject({ name });
   state.settings = await state.store.saveSettings({ lastProject: project.id });
   await refreshProjects();
   state.project = project;
   state.thread = thread;
   state.messages = [];
+  if (files) {
+    for (const [path, content] of Object.entries(files)) await state.fs.write(project.id, path, content);
+  }
+  state.node = createNodeSession({
+    fs: state.fs,
+    projectId: project.id,
+    onStdout: (text) => state.termView?.write?.(text),
+    onStderr: (text) => state.termView?.write?.(text),
+    env: { NODE_ENV: 'development' },
+  });
   attachShell();
   await renderSessions();
   renderTranscript();
@@ -151,10 +260,70 @@ function attachShell() {
   state.shell = new Shell({
     fs: state.fs,
     projectId: state.project.id,
-    runPython: async (code) => {
-      const py = await ensurePython();
-      py.runPython(code);
-      return py.output();
+    node: state.node,
+    jobs: state.jobs,
+    runPython: async (code, { file } = {}) => {
+      const files = await state.fs.snapshot(state.project.id).catch(() => ({}));
+      let captured = '';
+      const result = await runPython({
+        code,
+        file,
+        files,
+        onOutput: (text) => {
+          captured += text;
+        },
+        onFiles: async (changed) => {
+          for (const [path, content] of Object.entries(changed)) {
+            await state.fs.write(state.project.id, path, content).catch(() => {});
+          }
+          refreshFiles();
+        },
+      });
+      return captured || result.output || '';
+    },
+    runPip: async (packages) => {
+      let captured = '';
+      const result = await pipInstall(packages, { onOutput: (t) => (captured += t) });
+      return { code: result.code, installed: result.installed || [], output: captured };
+    },
+    runWasm: async (path, args) => {
+      const bytes = await state.fs.read(state.project.id, path).catch(() => null);
+      if (!bytes) return { code: 1, output: `wasm: ${path} not found\n` };
+      const files = await state.fs.snapshot(state.project.id).catch(() => ({}));
+      const encoder = new TextEncoder();
+      const fileMap = {};
+      for (const [name, text] of Object.entries(files)) fileMap[name] = encoder.encode(typeof text === 'string' ? text : '');
+      let output = '';
+      const result = await runWasi(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes), {
+        args: [path, ...args],
+        files: fileMap,
+        onStdout: (text) => (output += text),
+        onStderr: (text) => (output += text),
+        onWriteFile: (name, data) => {
+          state.fs.write(state.project.id, name, new TextDecoder().decode(data)).catch(() => {});
+        },
+      });
+      return { code: result.code ?? 0, output };
+    },
+    compileNative: async (path, language) => {
+      if (!canCompileC(state.settings)) {
+        return {
+          code: 1,
+          output:
+            'cc: no C toolchain is configured.\n' +
+            '  • C/C++ needs clang+lld+sysroot (~60 MB) — set a compile endpoint in Settings → Runtime, or\n' +
+            '  • compile elsewhere (zig cc --target=wasm32-wasi) and run the .wasm here: wasm main.wasm\n',
+        };
+      }
+      try {
+        const source = await state.fs.readText(state.project.id, path);
+        const wasm = await compileC({ source, language, filename: path, settings: state.settings });
+        const out = path.replace(/\.(c|cpp|cc|cxx)$/, '.wasm');
+        await state.fs.write(state.project.id, out, new Uint8Array(wasm));
+        return { code: 0, output: `compiled ${path} → ${out} (${(wasm.byteLength / 1024).toFixed(0)} KB)\nrun it: wasm ${out}\n` };
+      } catch (err) {
+        return { code: 1, output: `cc: ${err.message}\n${err.hint ? `${err.hint}\n` : ''}` };
+      }
     },
     runSql: async (dbPath, sql) => {
       const db = await getDb(dbPath);
@@ -181,8 +350,18 @@ async function openProject(id) {
   state.editorPath = '';
   $('#editor').value = '';
   $('#editor-path').textContent = 'No file selected';
+  state.node = createNodeSession({
+    fs: state.fs,
+    projectId: id,
+    onStdout: (text) => state.termView?.write?.(text),
+    onStderr: (text) => state.termView?.write?.(text),
+  });
   attachShell();
+  $('#project-name').textContent = state.project.name;
+  state.hooks = await loadHooks({ fs: state.fs, projectId: id, settings: state.settings }).catch(() => null);
+  await loadMcp();
   if (state.view === 'terminal') mountTerminal(true);
+  refreshPreview();
 }
 
 async function openThread(id) {
@@ -390,10 +569,12 @@ async function send(text) {
     deploy: (args) => doDeploy(args.target || 'preview', { projectName: args.projectName }),
     runtimeInfo: () => ({
       mode: 'browser',
-      filesystem: state.fs.backend.constructor.name,
+      filesystem: state.fs.mode,
       sqlite: true,
-      python: Boolean(window.__pyodide),
-      node: 'sandboxed JS only',
+      python: RUNTIME_MATRIX.python.how,
+      node: RUNTIME_MATRIX.node.how,
+      mcp: state.mcp.clients.map((client) => client.name),
+      c: canCompileC(state.settings) ? 'compile endpoint configured' : 'not configured (WASI binaries still run)',
       deploy: { github: Boolean(state.github?.token), targets: Object.keys(DEPLOY_TARGETS) },
       storage: navigator.storage?.estimate ? 'available' : 'unknown',
     }),
@@ -405,6 +586,14 @@ async function send(text) {
       await state.store.snapshot(state.project.id, files, label || 'auto');
     },
     emit: (event) => run.emit(event),
+    node: state.node,
+    jobs: state.jobs,
+    mcpTools: state.mcp.tools,
+    hooks: state.hooks,
+    snapshot: async () => {
+      const files = await state.fs.snapshot(state.project.id);
+      return files;
+    },
   });
   state.harness = harness;
 
@@ -521,6 +710,7 @@ function handleEvent(ev) {
       state.lastTurn = state.turn;
       state.turn = null;
       setStatus('ready');
+      refreshPreview({ force: Boolean(ev.filesChanged?.length) });
       break;
     }
     case 'error':
@@ -572,6 +762,8 @@ async function refreshFiles() {
   if (!state.project) return;
   state.files = await state.fs.tree(state.project.id);
   renderTree();
+  if (state.previewTimer) clearTimeout(state.previewTimer);
+  state.previewTimer = setTimeout(() => refreshPreview(), 250);
   const where = STORAGE_LABEL[state.storage] || 'in this browser';
   const count = state.files.filter((f) => !f.dir).length;
   $('#storage-note').textContent =
@@ -863,6 +1055,8 @@ async function handleClaimRoute() {
 
 function openSettings() {
   const body = $('#modal-body');
+  const heading = $('#modal-title');
+  if (heading) heading.textContent = 'Settings';
   const keys = state.settings.keys || {};
   const rows = Object.values(PROVIDERS)
     .filter((p) => !p.offline)
@@ -899,6 +1093,58 @@ function openSettings() {
       <div class="fields">${rows}</div>
     </section>
     <section>
+      <h3>Runtimes</h3>
+      <p class="hint">Everything below executes inside this tab. First use downloads what it needs; after that it is cached.</p>
+      <div class="runtime-grid">
+        ${Object.entries(RUNTIME_MATRIX)
+          .map(([name, info]) => `<div class="runtime ${info.real ? 'real' : 'partial'}">
+            <div class="row"><strong>${escapeHtml(name)}</strong>${info.real ? '<span class="tag ok">real</span>' : '<span class="tag">needs setup</span>'}</div>
+            <div class="hint">${escapeHtml(info.how)}</div>
+            <div class="hint dim">${escapeHtml(info.notes)}</div>
+          </div>`)
+          .join('')}
+      </div>
+      <div class="field"><label>C compiler endpoint (optional)</label>
+        <input type="text" id="set-cc" placeholder="https://your-compiler.example.com/compile" value="${escapeHtml(state.settings.cCompilerEndpoint || '')}">
+        <div class="hint">C/C++ needs clang+lld+sysroot (~60 MB). Point this at a service you run, or compile elsewhere and run the .wasm with <code>wasm main.wasm</code>.</div>
+      </div>
+      <div class="row">
+        <button class="btn" id="set-python">${state.pythonReady ? 'Python loaded' : 'Load Python now'}</button>
+        <button class="btn" id="set-node">Check Node runtime</button>
+      </div>
+    </section>
+
+    <section>
+      <h3>MCP servers</h3>
+      <p class="hint">Connect remote MCP servers (Gemini, Claude, GitHub, Linear…). Their tools appear to the agent as <code>mcp__server__tool</code>. Requests go straight from this browser to the server.</p>
+      <div id="mcp-list">${(state.settings.mcp || [])
+        .map((server, index) => `<div class="field mcp-row">
+          <div class="row">
+            <input type="text" data-mcp-name="${index}" placeholder="name" value="${escapeHtml(server.name || '')}">
+            <input type="text" data-mcp-url="${index}" placeholder="https://server.example.com/mcp" value="${escapeHtml(server.url || '')}">
+            <button class="icon-btn sm" data-mcp-remove="${index}" data-icon="trash" title="Remove"></button>
+          </div>
+          <div class="row">
+            <input type="password" data-mcp-token="${index}" placeholder="Bearer token (optional)" value="${server.token ? '••••••' : ''}" autocomplete="off">
+            <label class="check"><input type="checkbox" data-mcp-relay="${index}" ${server.useRelay ? 'checked' : ''}> route through relay (CORS)</label>
+          </div>
+        </div>`)
+        .join('')}</div>
+      <div class="row">
+        <button class="btn" id="set-mcp-add" data-icon="plus">Add server</button>
+        <button class="btn primary" id="set-mcp-connect" data-icon="link">Connect all</button>
+      </div>
+      <div class="hint" id="mcp-state">${state.mcp.clients.length ? `connected: ${state.mcp.clients.map((c) => c.name).join(', ')}` : 'none connected'}</div>
+    </section>
+
+    <section>
+      <h3>Hooks</h3>
+      <p class="hint">Project hooks live in <code>.alphacode/hooks.js</code>. A hook can block a tool, rewrite its arguments, or add a note for the model — the browser equivalent of Claude Code's hooks.</p>
+      <textarea id="set-hooks" class="editor" style="min-height:120px" spellcheck="false" placeholder="export default { pre_tool: [{ match: 'bash', run: () => ({ block: 'no shell' }) }] }">${escapeHtml(state.settings.hooks || '')}</textarea>
+      <div class="row" style="margin-top:8px"><button class="btn" id="set-hooks-save">Save hooks</button><span class="hint">Saved in this browser and reapplied on the next turn.</span></div>
+    </section>
+
+    <section>
       <h3>Your data</h3>
       <p class="hint">Projects, files and keys live in this browser. Export before clearing site data.</p>
       <div class="row">
@@ -920,6 +1166,72 @@ function openSettings() {
   $('#modal').hidden = false;
   paintIcons(body);
 
+  $('#set-cc').onchange = async (e) => {
+    state.settings = await state.store.saveSettings({ cCompilerEndpoint: e.target.value.trim() });
+  };
+  $('#set-python').onclick = async (e) => {
+    e.target.disabled = true;
+    e.target.textContent = 'loading…';
+    try {
+      await ensurePython();
+      state.pythonReady = true;
+      e.target.textContent = 'Python loaded';
+      toast('CPython is ready in this tab', 'ok');
+    } catch (err) {
+      e.target.textContent = 'Load Python now';
+      e.target.disabled = false;
+      toast(err.message, 'err');
+    }
+  };
+  $('#set-node').onclick = async () => {
+    const files = await state.fs.snapshot(state.project.id).catch(() => ({}));
+    const sample = Object.keys(files).find((f) => f.endsWith('.js'));
+    toast(`Node runtime ready${sample ? ` — try: node ${sample}` : ''}`, 'ok');
+  };
+  $('#set-mcp-add').onclick = async () => {
+    const list = [...(state.settings.mcp || []), { name: '', url: '', headers: {} }];
+    state.settings = await state.store.saveSettings({ mcp: list });
+    openSettings();
+  };
+  $('#set-mcp-connect').onclick = async () => {
+    const list = (state.settings.mcp || []).map((server) => ({ ...server }));
+    if (!list.length) return toast('Add a server first', 'warn');
+    const status = $('#mcp-state');
+    status.textContent = 'connecting…';
+    await loadMcp();
+    status.textContent = state.mcp.clients.length
+      ? `connected: ${state.mcp.clients.map((c) => `${c.name} (${state.mcp.tools.filter((t) => t.name.startsWith(`mcp__${c.name}__`)).length} tools)`).join(', ')}`
+      : `none connected — ${state.mcp.errors[0]?.error || 'check the URL'}`;
+  };
+  body.querySelectorAll('[data-mcp-remove]').forEach((button) => {
+    button.onclick = async () => {
+      const list = [...(state.settings.mcp || [])];
+      list.splice(Number(button.dataset.mcpRemove), 1);
+      state.settings = await state.store.saveSettings({ mcp: list });
+      openSettings();
+    };
+  });
+  body.querySelectorAll('[data-mcp-name],[data-mcp-url],[data-mcp-token],[data-mcp-relay]').forEach((input) => {
+    input.onchange = async () => {
+      const list = [...(state.settings.mcp || [])];
+      const index = Number(input.dataset.mcpName ?? input.dataset.mcpUrl ?? input.dataset.mcpToken ?? input.dataset.mcpRelay);
+      const server = { name: '', url: '', headers: {}, ...list[index] };
+      if (input.dataset.mcpName !== undefined) server.name = input.value.trim();
+      if (input.dataset.mcpUrl !== undefined) server.url = input.value.trim();
+      if (input.dataset.mcpToken !== undefined && !input.value.startsWith('••')) {
+        server.token = input.value.trim();
+        server.headers = { ...(server.headers || {}), ...(server.token ? { Authorization: `Bearer ${server.token}` } : {}) };
+      }
+      if (input.dataset.mcpRelay !== undefined) server.useRelay = input.checked;
+      list[index] = server;
+      state.settings = await state.store.saveSettings({ mcp: list });
+    };
+  });
+  $('#set-hooks-save').onclick = async () => {
+    state.settings = await state.store.saveSettings({ hooks: $('#set-hooks').value });
+    state.hooks = await loadHooks({ fs: state.fs, projectId: state.project.id, settings: state.settings }).catch(() => null);
+    toast('Hooks saved', 'ok');
+  };
   $('#set-model').onchange = async (e) => {
     state.model = e.target.value;
     state.settings = await state.store.saveSettings({ model: state.model });
@@ -974,30 +1286,7 @@ async function exportProject() {
 /* ---------------------------------------------------------------- python --- */
 
 async function ensurePython() {
-  if (window.__pyodideLoading) return window.__pyodideLoading;
-  window.__pyodideLoading = (async () => {
-    const script = document.createElement('script');
-    script.src = 'https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js';
-    document.head.append(script);
-    await new Promise((resolve, reject) => {
-      script.onload = resolve;
-      script.onerror = () => reject(new Error('Could not load Pyodide (offline?)'));
-    });
-    const py = await window.loadPyodide();
-    const buffer = { text: '' };
-    py.setStdout({ batched: (s) => (buffer.text += s + '\n') });
-    py.setStderr({ batched: (s) => (buffer.text += s + '\n') });
-    window.__pyodide = {
-      runPython: (code) => py.runPython(code),
-      output: () => {
-        const text = buffer.text;
-        buffer.text = '';
-        return text;
-      },
-    };
-    return window.__pyodide;
-  })();
-  return window.__pyodideLoading;
+  return loadPython({ onProgress: (step) => setStatus(step.message) });
 }
 
 /* ----------------------------------------------------------------- views --- */
@@ -1017,6 +1306,11 @@ function renderChrome() {
   $('#chip-model-txt').textContent = state.model.split('/').pop();
   $('#btn-model').textContent = `model: ${state.model.split('/').pop()}`;
   $('#btn-mode').textContent = `mode: ${state.mode}`;
+  const ready = ['node', 'python', 'npm'].filter((name) => RUNTIME_MATRIX[name]?.real);
+  const chip = $('#chip-runtime-txt');
+  if (chip) chip.textContent = `${ready.join(' · ')} · in-tab`;
+  const chipEl = $('#chip-runtime');
+  if (chipEl) chipEl.title = ready.map((name) => `${name}: ${RUNTIME_MATRIX[name].how}`).join('\n');
   renderGithub();
 }
 
@@ -1033,6 +1327,10 @@ const SLASH = [
   { cmd: '/export', desc: 'download the project as a zip' },
   { cmd: '/cost', desc: 'usage and context' },
   { cmd: '/doctor', desc: 'runtime diagnostics' },
+  { cmd: '/jobs', desc: 'background processes' },
+  { cmd: '/history', desc: 'checkpoints and versions' },
+  { cmd: '/mcp', desc: 'MCP servers and tools' },
+  { cmd: '/templates', desc: 'start from a template' },
   { cmd: '/init', desc: 'write ALPHACODE.md for this project' },
 ];
 
@@ -1085,10 +1383,36 @@ async function handleSlash(text) {
     case '/doctor': {
       const est = await navigator.storage?.estimate?.().catch(() => null);
       appendAssistant(
-        `**Doctor**\n\n- Mode: client-side (no AlphaCode server)\n- Filesystem: \`${state.fs.mode}\` (${state.storage || state.fs.mode})\n- Storage used: ${est ? bytes(est.usage || 0) : 'unknown'}\n- SQLite: WASM (sql.js)\n- Python: ${window.__pyodide ? 'loaded' : 'on demand (Pyodide)'}\n- GitHub: ${state.github?.token ? `connected as ${state.github.login}` : 'not connected'}\n- Model: \`${state.model}\``,
+        `**Doctor**\n\n- Mode: client-side (no AlphaCode server)\n- Filesystem: \`${state.fs.mode}\` (${state.storage || state.fs.mode})\n- Storage used: ${est ? bytes(est.usage || 0) : 'unknown'}\n- SQLite: WASM (sql.js)\n- Python: ${pythonReady() ? 'loaded' : 'on demand (Pyodide)'}\n- Node: ${state.node ? 'runtime attached' : 'not attached'}\n- npm: ${state.node ? 'edge resolver + tarballs in tab' : 'unavailable'}\n- Background jobs: ${state.jobs ? `${state.jobs.list().length} running` : 'no manager'}\n- MCP: ${state.mcp.clients.length ? state.mcp.clients.map((c) => c.name).join(', ') : 'no servers connected'}\n- Hooks: ${state.hooks ? 'loaded' : 'none'}\n- C/C++: ${canCompileC(state.settings) ? 'compile endpoint set' : 'compile elsewhere → run the .wasm'}\n- GitHub: ${state.github?.token ? `connected as ${state.github.login}` : 'not connected'}\n- Model: \`${state.model}\``,
       );
       return true;
     }
+    case '/jobs': {
+      if (!state.jobs || !state.jobs.list().length) {
+        appendAssistant('**No background jobs.** Start one with `npm run dev &` in the terminal, or ask the agent to use `job_start`.');
+        return true;
+      }
+      const rows = state.jobs.list().map((job) => `- \`%${job.id}\` ${job.command} — ${job.status} (${(job.durationMs / 1000).toFixed(1)}s)`);
+      appendAssistant(`**Background jobs**\n\n${rows.join('\n')}\n\nUse \`job_output\` in the terminal: \`fg %1\`, or stop one with \`kill %1\`.`);
+      return true;
+    }
+    case '/history':
+      $('#history-drawer').hidden = false;
+      await renderHistory();
+      return true;
+    case '/mcp': {
+      const lines = state.mcp.clients.length
+        ? state.mcp.clients.map((client) => {
+            const tools = state.mcp.tools.filter((tool) => tool.name.startsWith(`mcp__${client.name}__`));
+            return `- **${client.name}** — ${tools.length} tools: ${tools.slice(0, 6).map((tool) => `\`${tool.name}\``).join(', ')}${tools.length > 6 ? '…' : ''}`;
+          })
+        : ['No MCP servers connected. Add one in **Settings → MCP servers**.'];
+      appendAssistant(`**MCP**\n\n${lines.join('\n')}`);
+      return true;
+    }
+    case '/templates':
+      $('#template-sheet').hidden = false;
+      return true;
     case '/init':
       await send('Read the project files and write an ALPHACODE.md describing purpose, structure, how to run it, and conventions. Keep it under 40 lines.');
       return true;
@@ -1185,6 +1509,16 @@ function wireGlobal() {
   };
   $$('.tab').forEach((t) => (t.onclick = () => setView(t.dataset.view)));
   $('#btn-settings').onclick = openSettings;
+  $('#btn-rename-project').onclick = async (event) => {
+    event.stopPropagation();
+    if (!state.project) return;
+    const name = prompt('Project name', state.project.name);
+    if (!name || name === state.project.name) return;
+    const updated = await state.store.updateProject(state.project.id, { name }).catch(() => null);
+    state.project = updated || { ...state.project, name };
+    $('#project-name').textContent = state.project.name;
+    toast('Renamed', 'ok');
+  };
   $('#btn-close-modal').onclick = () => ($('#modal').hidden = true);
   $('#modal').onclick = (e) => {
     if (e.target.id === 'modal') $('#modal').hidden = true;

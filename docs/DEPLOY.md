@@ -27,6 +27,22 @@ Cloudflare dashboard → **Workers & Pages** → **Create** → **Pages** →
 | Build output directory | `dist` |
 | Root directory | *(leave empty — the repo root)* |
 
+### 2b. (Optional) the npm edge cache
+
+`functions/api/npm/**` is the dependency resolver the browser talks to. It works
+with nothing bound, but binding a KV namespace makes every resolved plan global:
+
+```bash
+npx wrangler kv namespace create NPM_CACHE
+```
+
+Then **Pages → Settings → Functions → KV namespace bindings → Add**:
+variable name `NPM_CACHE`, namespace = the one you just created. Redeploy.
+
+With it, the first install of a dependency set does the graph walk; every later
+user gets a single request. Without it, Cloudflare's per-colo cache still helps
+and browsers fall back to resolving locally.
+
 ### 3. Environment variables
 
 | Name | Value | Needed? |
@@ -135,6 +151,9 @@ projects) and never stores the token anywhere except the user's browser.
 | --- | --- | --- |
 | Build fails with `Invalid or unexpected token` in a `.mjs` file | Node < 20 | set `NODE_VERSION=22` |
 | `dist/assets/sql-wasm.wasm` 404 in production | build ran before `npm install` | re-run the build; `sql.js` is a build-time dependency |
+| `npm install` works but is slow | no KV binding | create `NPM_CACHE` (section 2b) — plans are then cached globally |
+| npm install fails with CORS on another host | the npm edge is a Pages Function | normal: the browser falls back to `registry.npmjs.org` directly; it still works |
+| `python` says "could not load" | Pyodide CDN blocked | it is loaded from jsdelivr on first use; allow it in CSP/network policy |
 | "The database panel fell back to the CDN" in build logs | `sql.js` missing | `npm install` locally, commit nothing, rebuild |
 | OAuth popup says "not configured" | env vars missing on the host | add both, redeploy |
 | OAuth popup says "redirect_uri mismatch" | callback URL differs from the deployment domain | update the OAuth App or use the production domain |

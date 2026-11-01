@@ -1,0 +1,433 @@
+/**
+ * The workspace: everything around the chat.
+ *
+ *   • a live preview that rebuilds itself after every agent turn
+ *   • device sizes, an element picker ("click the thing you want changed")
+ *   • a console that catches the preview's errors and hands them to the agent
+ *   • templates, version history, background-job strip, Build/Code layouts
+ *
+ * Kept separate from main.js so the agent loop stays readable: this file only
+ * renders and calls back into the app.
+ */
+import { $, $$, el, icon, escapeHtml, toast as uiToast, timeAgo } from './ui.js';
+import { bundlePreview } from '../engine/deploy.js';
+
+const api = {};
+const previewState = { device: 'desktop', picking: false, errors: [], lastHtml: '', lastUrl: '' };
+
+export function mountWorkspace(deps) {
+  Object.assign(api, deps);
+  bindLayout();
+  bindPreviewBar();
+  bindConsole();
+  bindHistory();
+  bindTemplates();
+  bindSuggestions();
+  bindMobilePanes();
+  renderTemplates();
+}
+
+/* ----------------------------------------------------------------- layout -- */
+
+function bindLayout() {
+  const app = $('#app');
+  for (const button of $$('#layout-switch .switch-btn')) {
+    button.onclick = () => setLayout(button.dataset.layout);
+  }
+  const saved = api.getState?.().settings?.layout;
+  if (saved) setLayout(saved, { silent: true });
+  app.dataset.mobilePane = 'chat';
+}
+
+export function setLayout(layout, { silent = false } = {}) {
+  const app = $('#app');
+  app.dataset.layout = layout;
+  for (const button of $$('#layout-switch .switch-btn')) {
+    const active = button.dataset.layout === layout;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', String(active));
+  }
+  if (layout === 'code') {
+    // Code mode opens the terminal once, because that is why you switched.
+    if (api.getState?.().view === 'chat' && api.setView) api.setView('chat');
+  }
+  if (!silent) api.saveSettings?.({ layout });
+  window.dispatchEvent(new window.CustomEvent('alphacode:layout', { detail: layout }));
+}
+
+/* ---------------------------------------------------------------- preview -- */
+
+function bindPreviewBar() {
+  for (const button of $$('.device')) {
+    button.onclick = () => setDevice(button.dataset.device);
+  }
+  $('#btn-preview-refresh').onclick = () => refreshPreview({ force: true });
+  $('#btn-preview-open').onclick = () => {
+    if (!previewState.lastHtml) {
+      uiToast('Nothing to open yet — ask for something first', 'warn');
+      return;
+    }
+    const blob = new Blob([previewState.lastHtml], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    window.open(url, '_blank', 'noopener');
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  };
+  $('#btn-pick').onclick = () => togglePicker();
+  $('#btn-preview').onclick = () => refreshPreview({ force: true });
+  $('#btn-publish').onclick = () => api.onPublish?.();
+  $('#btn-publish-top').onclick = () => api.onPublish?.();
+
+  window.addEventListener('message', onPreviewMessage);
+}
+
+export function setDevice(device) {
+  previewState.device = device;
+  $('#preview-stage').dataset.device = device;
+  for (const button of $$('.device')) button.classList.toggle('active', button.dataset.device === device);
+}
+
+function togglePicker(force) {
+  previewState.picking = force ?? !previewState.picking;
+  const frame = $('#preview-frame');
+  $('#btn-pick').classList.toggle('active', previewState.picking);
+  frame?.contentWindow?.postMessage(previewState.picking ? '__alpha:pick' : '__alpha:pick:off', '*');
+  if (previewState.picking) uiToast('Click anything in the preview to describe a change', 'info');
+}
+
+/** Instrumentation injected into every preview: errors, console, element picker. */
+const HARNESS = `<script>(function(){
+  // The preview runs in an opaque-origin sandbox, so localStorage/cookies throw.
+  // Give generated pages an in-memory stand-in instead of a crash.
+  try{ localStorage.getItem('alpha'); }catch(_){
+    var mem=Object.create(null);
+    var shim={getItem:function(k){return k in mem?mem[k]:null},setItem:function(k,v){mem[k]=String(v)},removeItem:function(k){delete mem[k]},clear:function(){mem=Object.create(null)},key:function(i){var k=Object.keys(mem)[i];return k===undefined?null:k}};
+    Object.defineProperty(shim,'length',{get:function(){return Object.keys(mem).length}});
+    try{ Object.defineProperty(window,'localStorage',{configurable:true,get:function(){return shim}}); }catch(_){}
+    try{ Object.defineProperty(window,'sessionStorage',{configurable:true,get:function(){return shim}}); }catch(_){}
+  }
+  var send=function(m){try{parent.postMessage({__alpha:1,...m},'*')}catch(e){}};
+  window.addEventListener('error',function(e){send({type:'error',message:String(e.message||'script error'),line:e.lineno,column:e.colno,stack:e.error&&e.error.stack?String(e.error.stack).slice(0,1200):''})});
+  window.addEventListener('unhandledrejection',function(e){send({type:'error',message:'Unhandled promise rejection: '+String(e.reason&&e.reason.message||e.reason)})});
+  var ce=console.error;console.error=function(){send({type:'log',level:'error',text:Array.prototype.map.call(arguments,String).join(' ')});ce.apply(console,arguments)};
+  var cw=console.warn;console.warn=function(){send({type:'log',level:'warn',text:Array.prototype.map.call(arguments,String).join(' ')});cw.apply(console,arguments)};
+  var picking=false;
+  addEventListener('message',function(e){ if(e.data==='__alpha:pick'){picking=true;document.documentElement.style.cursor='crosshair'} if(e.data==='__alpha:pick:off'){picking=false;document.documentElement.style.cursor=''} });
+  function selector(el){ if(!el||el.nodeType!==1) return ''; if(el.id) return '#'+el.id; var parts=[]; while(el&&el.nodeType===1&&parts.length<4){ var s=el.tagName.toLowerCase(); var cls=(typeof el.className==='string'?el.className:'').trim().split(/\\s+/).filter(Boolean).slice(0,2); if(cls.length) s+='.'+cls.join('.'); parts.unshift(s); el=el.parentElement } return parts.join(' > ') }
+  document.addEventListener('click',function(e){ if(!picking) return; e.preventDefault(); e.stopPropagation(); picking=false; document.documentElement.style.cursor='';
+    var t=e.target; send({type:'pick',selector:selector(t),tag:t.tagName.toLowerCase(),text:String(t.textContent||'').trim().slice(0,140),html:String(t.outerHTML||'').slice(0,800),rect:{w:Math.round(t.getBoundingClientRect().width),h:Math.round(t.getBoundingClientRect().height)}});
+  },true);
+})();<\/script>`;
+
+export async function refreshPreview({ force = false } = {}) {
+  if (!api.getState?.().project) return;
+  const frame = $('#preview-frame');
+  const empty = $('#preview-empty');
+  try {
+    const files = await api.getState().fs.snapshot(api.getState().project.id);
+    if (!Object.keys(files).some((f) => f.endsWith('.html'))) {
+      frame.hidden = true;
+      empty.hidden = false;
+      return;
+    }
+    const html = bundlePreview(files, 'index.html');
+    if (!force && html === previewState.lastHtml) return;
+    previewState.lastHtml = html;
+    previewState.errors = [];
+    updateConsole();
+    frame.srcdoc = injectHarness(html);
+    frame.hidden = false;
+    empty.hidden = true;
+    const title = $('#preview-title');
+    if (title) title.textContent = api.getState().project.name.toLowerCase().replace(/\s+/g, '-');
+    $('#status-dot')?.classList.remove('busy');
+  } catch (err) {
+    frame.hidden = true;
+    empty.hidden = false;
+    previewState.errors = [{ message: err.message, kind: 'preview' }];
+    updateConsole();
+  }
+}
+
+const injectHarness = (html) => {
+  if (/<\/head>/i.test(html)) return html.replace(/<\/head>/i, `${HARNESS}</head>`);
+  if (/<body[^>]*>/i.test(html)) return html.replace(/<body([^>]*)>/i, `<body$1>${HARNESS}`);
+  return HARNESS + html;
+};
+
+function onPreviewMessage(event) {
+  const data = event.data;
+  if (!data || data.__alpha !== 1) return;
+  if (data.type === 'error') {
+    pushError({ message: data.message, where: data.line ? `line ${data.line}` : '', stack: data.stack || '', kind: 'runtime' });
+  } else if (data.type === 'log' && data.level === 'error') {
+    pushError({ message: data.text, kind: 'console' });
+  } else if (data.type === 'pick') {
+    togglePicker(false);
+    const describe = `In ${data.selector || data.tag}, change: `;
+    const prompt = $('#prompt');
+    if (prompt) {
+      prompt.value = describe;
+      prompt.focus();
+      prompt.setSelectionRange(prompt.value.length, prompt.value.length);
+      autoGrow(prompt);
+    }
+    previewState.lastPick = data;
+    api.toast?.(`Selected ${data.tag}${data.selector ? ` · ${data.selector}` : ''}`, 'info');
+  }
+}
+
+function pushError(error) {
+  const key = error.message.slice(0, 160);
+  if (previewState.errors.some((e) => e.message.slice(0, 160) === key)) return;
+  previewState.errors.push(error);
+  if (previewState.errors.length > 12) previewState.errors.shift();
+  updateConsole();
+}
+
+function updateConsole() {
+  const drawer = $('#console-drawer');
+  const body = $('#console-body');
+  const count = $('#console-count');
+  if (!drawer) return;
+  const errors = previewState.errors;
+  if (!errors.length) {
+    drawer.hidden = true;
+    if (count) count.textContent = 'No issues';
+    return;
+  }
+  drawer.hidden = false;
+  count.textContent = `${errors.length} issue${errors.length === 1 ? '' : 's'} in the preview`;
+  body.textContent = errors.map((e) => `${e.kind === 'runtime' ? '✖' : '!'} ${e.message}${e.where ? ` (${e.where})` : ''}`).join('\n');
+}
+
+function bindConsole() {
+  $('#btn-console-close').onclick = () => {
+    previewState.errors = [];
+    updateConsole();
+  };
+  $('#btn-fix-errors').onclick = () => {
+    if (!previewState.errors.length) return;
+    const list = previewState.errors.map((e, i) => `${i + 1}. ${e.message}${e.stack ? `\n${e.stack.split('\n').slice(0, 3).join('\n')}` : ''}`).join('\n');
+    const prompt = $('#prompt');
+    prompt.value = `The preview is showing these errors. Fix the code so it works:\n\n${list}`;
+    autoGrow(prompt);
+    prompt.focus();
+    api.toast?.('Errors added to the prompt — press Send', 'warn');
+  };
+}
+
+function autoGrow(node) {
+  node.style.height = 'auto';
+  node.style.height = `${Math.min(node.scrollHeight, 220)}px`;
+}
+
+/* ---------------------------------------------------------------- history -- */
+
+function bindHistory() {
+  $('#btn-history').onclick = async () => {
+    await renderHistory();
+    $('#history-drawer').hidden = false;
+  };
+  $('#btn-close-history').onclick = () => {
+    $('#history-drawer').hidden = true;
+  };
+  $('#btn-checkpoint').onclick = async () => {
+    const state = api.getState?.();
+    if (!state?.project) return;
+    const files = await state.fs.snapshot(state.project.id);
+    await state.store.snapshot(state.project.id, files, 'manual');
+    api.toast?.('Checkpoint saved', 'ok');
+    await renderHistory();
+  };
+}
+
+export async function renderHistory() {
+  const state = api.getState?.();
+  const host = $('#history-list');
+  if (!host || !state?.project) return;
+  const snaps = await state.store.snapshots(state.project.id);
+  host.innerHTML = '';
+  if (!snaps.length) {
+    host.innerHTML = `<p class="hint" style="padding:12px">No versions yet. A checkpoint is saved automatically before the agent changes files, and every 30 seconds during a turn.</p>`;
+    return;
+  }
+  for (const snap of snaps) {
+    const count = Object.keys(snap.files || {}).length;
+    const row = el('div', { class: 'snap' });
+    row.innerHTML = `
+      <span class="card-icon" style="width:26px;height:26px;margin:0">${icon('clock', 13)}</span>
+      <div><div class="when">${timeAgo(snap.createdAt)}</div><div class="label">${escapeHtml(snap.label || 'checkpoint')} · ${count} files</div></div>
+      <button class="btn sm">Restore</button>`;
+    row.querySelector('button').onclick = async (event) => {
+      event.stopPropagation();
+      if (!confirm(`Restore ${count} files from ${timeAgo(snap.createdAt)}? Current files with the same names will be overwritten.`)) return;
+      await state.fs.restore(state.project.id, snap.files);
+      api.toast?.('Restored', 'ok');
+      api.refreshFiles?.();
+      refreshPreview({ force: true });
+      $('#history-drawer').hidden = true;
+    };
+    host.append(row);
+  }
+}
+
+/* -------------------------------------------------------------- templates -- */
+
+export const TEMPLATES = [
+  {
+    id: 'blank',
+    name: 'Blank canvas',
+    description: 'An empty project. Describe the app and the agent builds it.',
+    icon: 'plus',
+    prompt: '',
+  },
+  {
+    id: 'landing',
+    name: 'Landing page',
+    description: 'Hero, features, pricing, footer. Great first project.',
+    icon: 'spark',
+    prompt: 'Build a polished landing page for a SaaS product called "Nimbus". Include a hero with a gradient, three feature cards, a pricing section with three tiers, and a footer. Make it responsive and modern.',
+  },
+  {
+    id: 'dashboard',
+    name: 'Dashboard',
+    description: 'Sidebar, stat cards, a table and a chart placeholder.',
+    icon: 'grid',
+    prompt: 'Build an admin dashboard with a sidebar, four stat cards with sparkline-style graphics, a recent-orders table with sample data, and a dark/light toggle. No external libraries.',
+  },
+  {
+    id: 'todo',
+    name: 'Todo app',
+    description: 'Add, complete and filter tasks; state persists in the browser.',
+    icon: 'list',
+    prompt: 'Build a todo app with add, complete, delete, and filter (all/active/done). Persist to localStorage. Nice empty state and keyboard support.',
+  },
+  {
+    id: 'store',
+    name: 'Storefront',
+    description: 'Product grid, detail view and a working cart.',
+    icon: 'diamond',
+    prompt: 'Build a small storefront: product grid with 6 items, a product detail view, and a cart that persists in localStorage. Modern typography and hover states.',
+  },
+  {
+    id: 'blog',
+    name: 'Blog',
+    description: 'Index and article pages, readable typography.',
+    icon: 'file',
+    prompt: 'Build a minimal blog with an index page and two article pages, nice reading typography and a dark mode toggle.',
+  },
+];
+
+function bindTemplates() {
+  $('#btn-templates').onclick = () => {
+    $('#template-sheet').hidden = false;
+  };
+  $('#btn-close-templates').onclick = () => {
+    $('#template-sheet').hidden = true;
+  };
+  $('#template-sheet').addEventListener('click', (event) => {
+    if (event.target.id === 'template-sheet') $('#template-sheet').hidden = true;
+  });
+}
+
+function renderTemplates() {
+  const host = $('#template-grid');
+  if (!host) return;
+  host.innerHTML = '';
+  for (const template of TEMPLATES) {
+    const card = el('button', { class: 'template', type: 'button' });
+    card.innerHTML = `
+      <span class="thumb">${icon(template.icon, 22)}</span>
+      <strong>${escapeHtml(template.name)}</strong>
+      <span>${escapeHtml(template.description)}</span>`;
+    card.onclick = async () => {
+      $('#template-sheet').hidden = true;
+      await api.onTemplate?.(template);
+    };
+    host.append(card);
+  }
+}
+
+/* ------------------------------------------------------------- suggestions -- */
+
+function bindSuggestions() {
+  for (const button of $$('#suggestions button')) {
+    button.onclick = () => {
+      const prompt = $('#prompt');
+      prompt.value = button.dataset.suggest;
+      autoGrow(prompt);
+      prompt.focus();
+    };
+  }
+  const prompt = $('#prompt');
+  if (prompt) {
+    prompt.addEventListener('input', () => autoGrow(prompt));
+    prompt.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+        event.preventDefault();
+        api.onSend?.();
+      }
+    });
+  }
+  $('#btn-attach').onclick = () => pickAttachment();
+}
+
+async function pickAttachment() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/*,text/*,.md,.json,.csv,.sql,.html,.css,.js,.ts,.tsx,.py';
+  input.onchange = async () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    const text = await file.text().catch(() => '');
+    const prompt = $('#prompt');
+    const preview = text.length > 4000 ? `${text.slice(0, 4000)}\n… [truncated]` : text;
+    prompt.value = `${prompt.value}\n\n--- ${file.name} ---\n${preview}`.trim();
+    autoGrow(prompt);
+    prompt.focus();
+    api.toast?.(`Attached ${file.name}`, 'ok');
+  };
+  input.click();
+}
+
+/* -------------------------------------------------------------- mobile panes -- */
+
+function bindMobilePanes() {
+  const bar = el('div', { class: 'mobile-panes', role: 'tablist' });
+  bar.innerHTML = `
+    <button data-pane="chat" class="active">${icon('chat', 13)} Build</button>
+    <button data-pane="preview">${icon('eye', 13)} Preview</button>`;
+  document.body.append(bar);
+  for (const button of bar.querySelectorAll('button')) {
+    button.onclick = () => {
+      $('#app').dataset.mobilePane = button.dataset.pane;
+      for (const other of bar.querySelectorAll('button')) other.classList.toggle('active', other === button);
+      if (button.dataset.pane === 'preview') refreshPreview({ force: true });
+    };
+  }
+  $('#btn-menu').onclick = () => {
+    $('#sidebar').classList.toggle('open');
+    $('#scrim').hidden = !$('#sidebar').classList.contains('open');
+  };
+  $('#scrim').onclick = () => {
+    $('#sidebar').classList.remove('open');
+    $('#scrim').hidden = true;
+  };
+}
+
+/* ------------------------------------------------------------------ jobs --- */
+
+export function renderJobs(jobs = []) {
+  const strip = $('#job-strip');
+  if (!strip) return;
+  const running = jobs.filter((job) => job.status === 'running');
+  if (!running.length) {
+    strip.hidden = true;
+    strip.innerHTML = '';
+    return;
+  }
+  strip.hidden = false;
+  strip.innerHTML = running
+    .map((job) => `<span class="job running"><span class="dot"></span>%${job.id} ${escapeHtml(job.command)}</span>`)
+    .join('');
+}

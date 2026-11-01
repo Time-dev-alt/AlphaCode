@@ -226,7 +226,9 @@ test('shell runs JavaScript files in a sandbox', async () => {
 test('shell refuses destructive paths outside the project and unknown binaries', async () => {
   const { shell } = await shellFor();
   assert.equal((await shell.run('rm ../../etc/passwd')).code, 1);
-  assert.equal((await shell.run('pip install x')).code, 127);
+  assert.equal((await shell.run('definitely-not-a-command')).code, 127);
+  // pip exists now, but refuses politely until Python is loaded
+  assert.equal((await shell.run('pip install x')).code, 1);
 });
 
 test('shell help documents the command set', async () => {

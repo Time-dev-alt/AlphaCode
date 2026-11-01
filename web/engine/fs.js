@@ -268,6 +268,74 @@ export class FileSystem {
     return typeof value === 'string' ? value : new TextDecoder().decode(value);
   }
 
+  /**
+   * Every text file as `{ path: contents }` — the shape the harness, the Node
+   * runtime and the preview builder all want. Binary and huge files are skipped
+   * so one dropped archive cannot blow up a turn.
+   */
+  async snapshot(projectId, { includeModules = false, maxFiles = 2000 } = {}) {
+    const files = await this.list(projectId);
+    const out = {};
+    let count = 0;
+    for (const file of files) {
+      if (count >= maxFiles) break;
+      if (!includeModules && file.path.startsWith('node_modules/')) continue;
+      if (isBinaryPath(file.path)) continue;
+      if ((file.size || 0) > 2_000_000) continue;
+      try {
+        out[file.path] = await this.readText(projectId, file.path);
+        count += 1;
+      } catch {
+        /* file vanished mid-listing — skip it */
+      }
+    }
+    return out;
+  }
+
+  /** Replace the project contents with `files` (used by restores). */
+  async restore(projectId, files) {
+    const existing = await this.list(projectId).catch(() => []);
+    for (const file of existing) {
+      if (!(file.path in files) && !file.path.startsWith('node_modules/')) {
+        await this.remove(projectId, file.path).catch(() => {});
+      }
+    }
+    for (const [path, content] of Object.entries(files || {})) {
+      await this.write(projectId, path, content);
+    }
+    return Object.keys(files || {}).length;
+  }
+
+  /** A nested tree for the file panel: `[{ name, path, dir, children }]`. */
+  async tree(projectId, { showModules = false } = {}) {
+    const files = await this.list(projectId);
+    const root = [];
+    for (const file of files) {
+      if (!showModules && file.path.startsWith('node_modules/')) continue;
+      const parts = file.path.split('/');
+      let level = root;
+      let prefix = '';
+      for (let i = 0; i < parts.length; i += 1) {
+        prefix = prefix ? `${prefix}/${parts[i]}` : parts[i];
+        const isLeaf = i === parts.length - 1;
+        let node = level.find((entry) => entry.name === parts[i] && entry.dir === !isLeaf);
+        if (!node) {
+          node = isLeaf
+            ? { name: parts[i], path: prefix, dir: false, size: file.size || 0 }
+            : { name: parts[i], path: prefix, dir: true, children: [] };
+          level.push(node);
+        }
+        if (!isLeaf) level = node.children;
+      }
+    }
+    const sort = (nodes) => {
+      nodes.sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name) : a.dir ? -1 : 1));
+      for (const node of nodes) if (node.children) sort(node.children);
+      return nodes;
+    };
+    return sort(root);
+  }
+
   async exists(projectId, rawPath) {
     try {
       await this.backend.read(projectId, normPath(rawPath));

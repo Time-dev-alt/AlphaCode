@@ -54,6 +54,23 @@ const ICONS = {
   warn: '<path d="M12 4 2 20h20z"/><path d="M12 10v5m0 3h.01"/>',
   trash: '<path d="M4 7h16M9 7V5h6v2m-8 0 1 13h8l1-13"/>',
   folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  wand: '<path d="m4 20 9-9"/><path d="M14 4l1.5 3L19 8.5 15.5 10 14 13l-1.5-3L9 8.5 12.5 7z"/><path d="M19 15l.8 1.7L21.5 17.5 19.8 18.3 19 20l-.8-1.7L16.5 17.5 18.2 16.7z"/>',
+  pencil: '<path d="M4 20h4l10-10-4-4L4 16z"/><path d="m14 6 4 4"/>',
+  history: '<path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 8v4l3 2"/>',
+  grid: '<rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/>',
+  paperclip: '<path d="M21 12.5 12.5 21a5 5 0 0 1-7-7l8-8a3.5 3.5 0 0 1 5 5l-8 8a2 2 0 0 1-3-3l7-7"/>',
+  monitor: '<rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/>',
+  tablet: '<rect x="5" y="2" width="14" height="20" rx="3"/><path d="M12 18h.01"/>',
+  phone: '<rect x="7" y="2" width="10" height="20" rx="3"/><path d="M11 18h2"/>',
+  cursor: '<path d="m4 3 7 17 2.5-6.5L20 11z"/>',
+  external: '<path d="M14 4h6v6"/><path d="M20 4 11 13"/><path d="M19 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5"/>',
+  alert: '<path d="M12 9v4m0 3h.01"/><circle cx="12" cy="12" r="9"/>',
+  bolt: '<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>',
+  camera: '<path d="M4 8h3l2-3h6l2 3h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/><circle cx="12" cy="13" r="3.5"/>',
+  link: '<path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1.5 1.5"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1.5-1.5"/>',
+  shield: '<path d="M12 3 5 6v6c0 4 3 7 7 9 4-2 7-5 7-9V6z"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  code: '<path d="m9 18-6-6 6-6m6 12 6-6-6-6"/>',
 };
 
 export function paintIcons(root = document) {

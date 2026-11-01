@@ -33,12 +33,12 @@ const log = (...a) => console.log('[build:pages]', ...a);
 const sha = (buf) => crypto.createHash('sha256').update(buf).digest('hex').slice(0, 8);
 const sri = (buf) => `sha384-${crypto.createHash('sha384').update(buf).digest('base64')}`;
 
-async function bundle() {
+async function bundle(entry = path.join(ROOT, 'web', 'app', 'main.js'), extraDefine = {}) {
   const esbuild = await import('esbuild');
   const outdir = path.join(DIST, 'assets');
   await fsp.mkdir(outdir, { recursive: true });
   const result = await esbuild.build({
-    entryPoints: [path.join(ROOT, 'web', 'app', 'main.js')],
+    entryPoints: [entry],
     bundle: true,
     format: 'esm',
     target: ['es2022'],
@@ -53,6 +53,7 @@ async function bundle() {
       // The bundle is served from /assets/, so the wasm sits next to it. Defining
       // import.meta.url also keeps the output runnable as a classic script (tests).
       '__ASSET_BASE__': '"/assets/"',
+      ...extraDefine,
     },
     loader: { '.css': 'css' },
     logLevel: 'silent',
@@ -94,9 +95,17 @@ async function main() {
   await fsp.mkdir(DIST, { recursive: true });
   const integrity = {};
 
+  // ---- background-process worker ---------------------------------------
+  // Built first so the app bundle can reference it by its content hash.
+  log('bundling the background-process worker (node runtime in a Web Worker)');
+  let worker = await bundle(path.join(ROOT, 'web', 'engine', 'worker.js'));
+  const workerName = `worker.${sha(worker)}.js`;
+  await fsp.writeFile(path.join(DIST, 'assets', workerName), worker);
+  log(`assets/${workerName} (${(Buffer.byteLength(worker) / 1024).toFixed(0)} KB)`);
+
   // ---- JS + CSS --------------------------------------------------------
-  log('bundling the client (harness + filesystem + shell + sqlite + deploy)');
-  let js = await bundle();
+  log('bundling the client (harness + filesystem + shell + npm + sqlite + deploy)');
+  let js = await bundle(undefined, { __WORKER_URL__: JSON.stringify(`/assets/${workerName}`) });
   if (OBFUSCATE) js = await obfuscate(js);
   const jsName = `app.${sha(js)}.js`;
   await fsp.writeFile(path.join(DIST, 'assets', jsName), js);

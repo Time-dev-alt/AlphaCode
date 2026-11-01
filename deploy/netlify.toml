@@ -1,0 +1,51 @@
+# AlphaCode on Netlify: static client + reverse proxy to the Node runtime.
+#
+# 1. Build: `npm run build` → publish directory `dist/public`
+# 2. Replace @@ALPHACODE_ORIGIN@@ with your runtime URL (https, no trailing /),
+#    e.g. https://alphacode-runtime.fly.dev — or run:
+#      node scripts/render-edge-config.mjs --provider=netlify --origin=https://…
+# 3. netlify deploy --prod
+
+[build]
+  command = "npm run build"
+  publish = "dist/public"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+# API + previews + SSE streams must go to the Node runtime (no buffering).
+[[redirects]]
+  from = "/api/*"
+  to = "@@ALPHACODE_ORIGIN@@/api/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/p/*"
+  to = "@@ALPHACODE_ORIGIN@@/p/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/healthz"
+  to = "@@ALPHACODE_ORIGIN@@/healthz"
+  status = 200
+  force = true
+
+# SPA fallback.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "no-referrer"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=(), payment=()"

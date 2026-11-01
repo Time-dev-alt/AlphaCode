@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=5">
+<meta name="theme-color" content="#0a0b0f" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#faf9f7" media="(prefers-color-scheme: light)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="description" content="AlphaCode — a coding agent harness that reads, writes, runs, queries and deploys real code.">
+<title>AlphaCode — coding agent harness</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<div class="bg-fx"></div>
+<div id="app">
+  <header class="topbar">
+    <button class="icon-btn only-mobile" id="btn-drawer" aria-label="Open projects" data-icon="menu"></button>
+    <div class="brand">
+      <div class="mark">α</div>
+      <div class="brand-txt"><b>AlphaCode</b><small>agent harness</small></div>
+    </div>
+    <div class="sep"></div>
+    <button class="project-btn" id="btn-project" title="Switch project">
+      <span id="project-name">…</span>
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+    </button>
+    <div class="chips">
+      <button class="chip" id="chip-model" title="Choose model"><span class="dot ok"></span><span id="chip-model-txt">auto</span></button>
+      <button class="chip" id="chip-mode" title="Agent mode (Shift+Tab)"><span data-icon="shield"></span><span id="chip-mode-txt">default</span></button>
+      <button class="chip" id="chip-quota" title="Daily allowance"><span data-icon="gauge"></span><span id="chip-quota-txt">—</span></button>
+    </div>
+    <div class="grow"></div>
+    <button class="btn sm" id="btn-deploy-top"><span data-icon="rocket"></span><span class="hide-sm">Deploy</span></button>
+    <button class="icon-btn" id="btn-palette" title="Command palette (⌘K)" data-icon="command"></button>
+    <button class="icon-btn" id="btn-settings" title="Settings" data-icon="settings"></button>
+    <button class="btn sm auth-btn" id="btn-auth">Sign in</button>
+  </header>
+
+  <div class="layout">
+    <nav class="rail" id="rail" aria-label="Sections">
+      <button data-view="chat" class="active" title="Chat"><span data-icon="chat"></span></button>
+      <button data-view="files" title="Files"><span data-icon="folder"></span></button>
+      <button data-view="terminal" title="Terminal"><span data-icon="terminal"></span></button>
+      <button data-view="db" title="Database"><span data-icon="database"></span></button>
+      <button data-view="deploy" title="Deployments"><span data-icon="rocket"></span></button>
+      <div class="spacer"></div>
+      <button data-view="settings" title="Settings"><span data-icon="settings"></span></button>
+    </nav>
+
+    <aside class="panel" id="panel">
+      <div class="panel-h">
+        <strong>Projects</strong>
+        <div class="grow"></div>
+        <button class="icon-btn sm" id="btn-new-project" title="New project" data-icon="plus"></button>
+      </div>
+      <div class="panel-body" id="project-list"></div>
+      <div class="panel-h mini"><strong>Sessions</strong><div class="grow"></div><button class="icon-btn sm" id="btn-new-session" title="New session" data-icon="plus"></button></div>
+      <div class="panel-body tight" id="session-list"></div>
+      <div class="panel-foot">
+        <div class="quota-box" id="quota-box">
+          <div class="row"><span>Daily requests</span><b id="quota-label">—</b></div>
+          <div class="meter"><i id="quota-bar"></i></div>
+          <div class="hint" id="quota-hint">Free forever on the Kilo router. Sign in for 40/day.</div>
+        </div>
+      </div>
+    </aside>
+
+    <main class="center" id="center">
+      <section class="view active" id="view-chat">
+        <div class="transcript" id="transcript" aria-live="polite">
+          <div class="transcript-inner" id="transcript-inner"></div>
+        </div>
+        <div class="composer-wrap">
+          <div class="composer" id="composer">
+            <div class="composer-top">
+              <button class="pill" id="pill-mode" title="Shift+Tab to change mode"><span data-icon="shield"></span><span id="pill-mode-txt">default</span></button>
+              <button class="pill" id="pill-model"><span class="dot ok"></span><span id="pill-model-txt">auto</span></button>
+              <button class="pill ghost" id="pill-plan" hidden><span data-icon="list"></span>plan ready</button>
+              <div class="grow"></div>
+              <span class="ctx" id="ctx-meter" title="Context window usage">0%</span>
+            </div>
+            <textarea id="prompt" rows="1" placeholder="Ask AlphaCode to build something…  ( / for commands, ⇧⏎ for newline )" spellcheck="false"></textarea>
+            <div class="composer-bottom">
+              <button class="icon-btn sm" id="btn-attach" title="Attach files" data-icon="paperclip"></button>
+              <input type="file" id="file-input" multiple hidden>
+              <span class="small muted hide-sm" id="composer-hint">⏎ send · ⇧⏎ newline</span>
+              <div class="grow"></div>
+              <button class="icon-btn sm" id="btn-stop" title="Stop" hidden><span data-icon="stop"></span></button>
+              <button class="btn primary" id="btn-send" aria-label="Send"><span data-icon="send"></span><span class="hide-sm">Send</span></button>
+            </div>
+          </div>
+          <div class="slash-menu" id="slash-menu" hidden></div>
+        </div>
+      </section>
+
+      <section class="view" id="view-files">
+        <div class="view-head">
+          <div class="tabs" id="files-tabs">
+            <button class="tab active" data-tab="tree">Explorer</button>
+            <button class="tab" data-tab="search">Search</button>
+            <button class="tab" data-tab="git">Checkpoints</button>
+          </div>
+          <div class="grow"></div>
+          <button class="btn sm" id="btn-export"><span data-icon="download"></span>Export</button>
+          <button class="btn sm" id="btn-install-deps"><span data-icon="package"></span>Install deps</button>
+        </div>
+        <div class="files-body">
+          <div class="tree-pane" id="tree-pane">
+            <div class="tree" id="file-tree"></div>
+          </div>
+          <div class="editor-pane" id="editor-pane">
+            <div class="editor-head">
+              <span class="path" id="editor-path">No file open</span>
+              <div class="grow"></div>
+              <span class="small muted" id="editor-meta"></span>
+              <button class="btn sm" id="btn-save-file" disabled>Save</button>
+            </div>
+            <textarea id="editor" spellcheck="false" placeholder="Select a file to edit…" disabled></textarea>
+          </div>
+          <div class="search-pane" id="search-pane" hidden>
+            <div class="search-bar"><input id="search-input" type="search" placeholder="Search across files…"><button class="btn sm" id="btn-search">Find</button></div>
+            <div id="search-results" class="search-results"></div>
+          </div>
+          <div class="git-pane" id="git-pane" hidden>
+            <div class="git-actions"><button class="btn sm" id="btn-checkpoint">Create checkpoint</button><span class="small muted" id="git-status"></span></div>
+            <div id="git-log" class="git-log"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" id="view-terminal">
+        <div class="view-head">
+          <div class="tabs"><button class="tab active">Terminal</button></div>
+          <span class="small muted" id="term-status">disconnected</span>
+          <div class="grow"></div>
+          <button class="btn sm" id="btn-term-new">New</button>
+          <button class="btn sm danger" id="btn-term-kill">Kill</button>
+        </div>
+        <div class="term-wrap"><div id="terminal" class="term" tabindex="0" aria-label="Interactive terminal"></div></div>
+      </section>
+
+      <section class="view" id="view-db">
+        <div class="view-head">
+          <div class="tabs"><button class="tab active">Database</button></div>
+          <span class="small muted" id="db-status">—</span>
+          <div class="grow"></div>
+          <select id="db-select" class="compact"></select>
+          <button class="btn sm" id="btn-db-refresh">Refresh</button>
+        </div>
+        <div class="db-body">
+          <div class="db-side" id="db-tables"></div>
+          <div class="db-main">
+            <div class="db-toolbar">
+              <input id="db-sql" placeholder="SELECT * FROM users LIMIT 20;" spellcheck="false">
+              <button class="btn sm primary" id="btn-db-run">Run</button>
+              <button class="btn sm" id="btn-db-write" title="Run as write (INSERT/UPDATE/DELETE/DDL)">Write</button>
+            </div>
+            <div id="db-result" class="db-result"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" id="view-deploy">
+        <div class="view-head">
+          <div class="tabs"><button class="tab active">Deployments</button></div>
+          <div class="grow"></div>
+          <button class="btn sm primary" id="btn-deploy-now"><span data-icon="rocket"></span>Deploy</button>
+        </div>
+        <div class="deploy-body">
+          <div class="deploy-grid" id="deploy-targets"></div>
+          <h3 class="section-title">History</h3>
+          <div id="deploy-history" class="deploy-history"></div>
+        </div>
+      </section>
+
+      <section class="view" id="view-settings">
+        <div class="view-head"><div class="tabs"><button class="tab active">Settings</button></div></div>
+        <div class="settings-body" id="settings-inline"></div>
+      </section>
+    </main>
+  </div>
+
+  <footer class="statusbar">
+    <span class="dot ok" id="status-dot"></span>
+    <span id="status-text">connecting…</span>
+    <div class="grow"></div>
+    <span class="hide-sm" id="status-runtime"></span>
+    <span class="sep-dot">·</span>
+    <span id="status-model">auto</span>
+  </footer>
+</div>
+
+<div id="modal-root"></div>
+<div id="toasts" class="toasts" aria-live="polite"></div>
+<script type="module" src="/assets/app.js"></script>
+</body>
+</html>

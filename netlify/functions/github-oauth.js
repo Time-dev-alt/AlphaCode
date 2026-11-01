@@ -21,9 +21,24 @@ ${payload.error ? '' : 'setTimeout(function(){window.close()},500)'}</script>`,
 
 export async function handler(event) {
   const url = new URL(event.rawUrl || `https://${event.headers.host}${event.path}`);
-  const step = url.pathname.endsWith('/callback') ? 'callback' : 'start';
+  const step = url.pathname.endsWith('/callback') ? 'callback' : url.pathname.endsWith('/health') ? 'health' : 'start';
   const id = process.env.GITHUB_CLIENT_ID;
   const secret = process.env.GITHUB_CLIENT_SECRET;
+
+  if (step === 'health') {
+    return {
+      statusCode: 200,
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+      body: JSON.stringify({
+        ok: true,
+        mode: 'client',
+        version: process.env.ALPHACODE_VERSION || '3.0.0',
+        githubOAuth: Boolean(id && secret),
+        providers: { kilo: true, opencode: true, byok: true },
+        hosting: 'none — projects run and deploy from the browser',
+      }),
+    };
+  }
 
   if (!id || !secret) {
     return page({ error: 'GitHub OAuth is not configured. Add GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET in Netlify → Site settings → Environment variables, then redeploy. Instant previews work without it.' }, 500);

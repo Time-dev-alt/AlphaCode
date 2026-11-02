@@ -19,7 +19,7 @@ import { renderScaffold } from '../engine/agent/scaffolds.js';
 import { FREE_MODELS, PROVIDERS, GUEST_MODEL } from '../engine/providers.js';
 import { fetchModels, mergeCatalog } from '../engine/agent/catalog.js';
 import { toolchainStatus } from '../engine/wasm-toolchains.js';
-import { bootWebContainer, installInContainer, startDevInContainer, webcontainerSupported, webcontainerDiagnosis } from '../engine/node/webcontainer.js';
+import { bootWebContainer, installInContainer, startDevInContainer, inspectSandbox, setIsolationCookie, SandboxUnavailable } from '../engine/node/webcontainer.js';
 import { runPython, pipInstall, loadPython, pythonReady } from '../engine/python.js';
 import { createNodeSession } from '../engine/node/session.js';
 import { nodepodStatus, NODEPOD_VERSION } from '../engine/node/nodepod.js';
@@ -491,7 +491,10 @@ async function boot() {
   mountActivity();
   trackTranscriptScroll();
   keepTranscriptPinned();
-  if (state.settings.pane === 'preview-hidden') $('#app').dataset.pane = 'preview-hidden';
+  // A hidden preview is a desktop arrangement. On a phone the preview is a pane,
+  // and restoring a desktop preference there would leave a blank screen behind
+  // the Preview button.
+  setPreviewVisible(state.settings.pane !== 'preview-hidden' || !isMobile(), { persist: false });
   await refreshProjects();
   const last = state.settings.lastProject;
   const projects = state.projects;
@@ -2010,6 +2013,31 @@ function renderGithub() {
   }
 }
 
+/**
+ * Show or hide the preview column.
+ *
+ * Both the collapse control in the preview bar and the Preview toggle in the tab
+ * bar go through here, so the two can never disagree — and because the tab-bar
+ * toggle lives *outside* the column, hiding the preview is always reversible.
+ */
+function setPreviewVisible(visible, { persist = true } = {}) {
+  const app = $('#app');
+  if (!app) return;
+  // Only the non-default state is written to the DOM. `data-pane="preview"` on
+  // the app root would collide with the `[data-pane="preview"]` selector the
+  // bottom bar uses, and the app element comes first in the document.
+  if (visible) delete app.dataset.pane;
+  else app.dataset.pane = 'preview-hidden';
+  const toggle = $('#btn-preview-toggle');
+  if (toggle) {
+    toggle.setAttribute('aria-pressed', String(visible));
+    toggle.title = visible ? 'Hide the preview' : 'Show the preview';
+  }
+  const collapse = $('#btn-preview-collapse');
+  if (collapse) collapse.title = visible ? 'Hide the preview' : 'Show the preview';
+  if (persist) state.store.saveSettings({ pane: visible ? 'preview' : 'preview-hidden' });
+}
+
 async function claimPreview(deployment) {
   const url = `${location.origin}/#/p/${deployment.claimId}`;
   await copyText(url);
@@ -2327,19 +2355,20 @@ function openSettings() {
     ) + settingsCard(
       'Node sandbox — WebContainers',
       'Runs a real Node.js and npm in the tab, so Vite, Next and Express projects build and serve exactly as they do on a laptop.',
-      `<label class="check"><input type="checkbox" id="set-webcontainer" ${state.settings.webcontainer ? 'checked' : ''}> prepare this device for WebContainers</label>
-      <div class="hint" id="wc-state">${escapeHtml(
-        webcontainerSupported()
-          ? 'This page is cross-origin isolated — the sandbox can boot.'
-          : webcontainerDiagnosis().reason + (webcontainerDiagnosis().hint ? ` ${webcontainerDiagnosis().hint}` : ''),
-      )}</div>
+      `<label class="check"><input type="checkbox" id="set-webcontainer" ${state.settings.webcontainer ? 'checked' : ''}> enable the Node sandbox on this device</label>
+      <ul class="sandbox-checks" id="wc-checks" aria-live="polite"><li class="sandbox-check">checking this browser…</li></ul>
+      <div class="hint" id="wc-state">WebContainers needs a cross-origin isolated page, so the switch sets a cookie and reloads.</div>
       <div class="row" style="margin-top:10px">
         <button class="btn primary" id="set-wc-boot" data-icon="play" data-icon-size="14">Boot Node sandbox</button>
         <button class="btn" id="set-wc-install" data-icon="package" data-icon-size="14">npm install</button>
         <button class="btn" id="set-wc-dev" data-icon="bolt" data-icon-size="14">npm run dev</button>
+        <button class="btn" id="set-wc-recheck" data-icon="refresh" data-icon-size="14">Re-check</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button class="link" id="set-wc-newtab" data-icon="external" data-icon-size="13" hidden>Open AlphaCode in its own tab</button>
       </div>
       <pre class="wc-log" id="wc-log" aria-live="polite"></pre>
-      <div class="hint">Turning this on reloads the tab with two extra headers (COOP/COEP). While it is on, OAuth pop-ups open as tabs and some cross-origin images in a generated preview may need CORS — turn it off when you are done. Safari cannot boot WebContainers yet.</div>`,
+      <div class="hint">The switch reloads the tab with two extra headers (COOP/COEP). While they are on, OAuth pop-ups open as tabs and a few cross-origin images in a generated preview may need CORS — turn it off when you are done. Safari cannot boot WebContainers yet.</div>`,
     ),
 
     packages: settingsCard(
@@ -2567,6 +2596,49 @@ function openSettings() {
 
   /* -------------------------------------------------------- node sandbox -- */
 
+  /**
+   * The sandbox is the one feature that can fail for four unrelated reasons, so
+   * the panel shows the requirements themselves instead of one red line. Each
+   * row is a check `inspectSandbox()` made a moment ago.
+   */
+  const paintSandboxChecks = (report) => {
+    const list = $('#wc-checks');
+    if (list) {
+      list.innerHTML = report.checks
+        .map(
+          (check) =>
+            `<li class="sandbox-check ${check.ok ? 'ok' : 'fail'}">
+              <span class="sandbox-mark" data-icon="${check.ok ? 'check-circle' : 'alert'}" data-icon-size="13"></span>
+              <span class="sandbox-label">${escapeHtml(check.label)}</span>
+              <span class="sandbox-detail">${escapeHtml(check.detail || '')}</span>
+            </li>`,
+        )
+        .join('');
+      paintIcons(list);
+    }
+    const status = $('#wc-state');
+    if (status) {
+      status.textContent = report.ok
+        ? 'Ready — booting a container only needs a click. The first boot downloads the runtime (≈3 MB, cached).'
+        : report.hint;
+      status.className = `hint ${report.ok ? 'ok' : ''}`;
+    }
+    const boot = $('#set-wc-boot');
+    if (boot) {
+      boot.disabled = !report.ok;
+      boot.title = report.ok ? '' : report.blockers.map((b) => b.label).join(', ');
+    }
+    const newTab = $('#set-wc-newtab');
+    if (newTab) newTab.hidden = !(report.framed && !report.isolated);
+    return report;
+  };
+
+  let sandboxReport = { ok: false, checks: [], blockers: [], hint: '' };
+  const refreshSandbox = async () => {
+    sandboxReport = await inspectSandbox().catch(() => ({ ok: false, checks: [], blockers: [], hint: 'could not inspect this browser' }));
+    return paintSandboxChecks(sandboxReport);
+  };
+
   const wcToggle = $('#set-webcontainer');
   if (wcToggle) {
     wcToggle.onchange = async () => {
@@ -2575,10 +2647,11 @@ function openSettings() {
       // Isolation is decided by response headers, so the tab has to reload for
       // the switch to mean anything. That is also the honest UX: the user sees
       // exactly when the headers change.
-      document.cookie = on ? 'nex_wc=1; path=/; max-age=31536000; samesite=lax' : 'nex_wc=; path=/; max-age=0; samesite=lax';
+      setIsolationCookie(on);
       toast(on ? 'Reloading with the Node sandbox enabled…' : 'Reloading without the Node sandbox…', 'info', 2400);
       setTimeout(() => location.reload(), 800);
     };
+    refreshSandbox();
   }
   const wcLog = (text) => {
     const node = $('#wc-log');
@@ -2593,10 +2666,20 @@ function openSettings() {
   };
   const wcBoot = async () => {
     if (state.wc?.instance) return state.wc.instance;
+    // Re-check rather than trusting the panel: the user may have opened this tab
+    // before turning the switch on, and the headers only change on reload.
+    const report = await refreshSandbox();
+    if (!report.ok) {
+      throw new SandboxUnavailable(`the sandbox cannot start here: ${report.blockers.map((b) => b.label).join(', ')}`, {
+        hint: report.hint,
+        blockers: report.blockers,
+      });
+    }
     const files = await state.fs.snapshot(state.project.id).catch(() => ({}));
     wcStatus('booting the container…');
     const instance = await bootWebContainer({
       files,
+      inspect: report,
       onOutput: wcLog,
       onServerReady: (url) => {
         wcStatus(`dev server live at ${url}`);
@@ -2608,6 +2691,13 @@ function openSettings() {
     wcStatus('container ready — run npm install');
     return instance;
   };
+  $('#set-wc-recheck')?.addEventListener('click', () => {
+    refreshSandbox();
+    toast('Sandbox requirements re-checked', 'info', 2200);
+  });
+  $('#set-wc-newtab')?.addEventListener('click', () => {
+    window.open(location.href, '_blank', 'noopener');
+  });
   $('#set-wc-boot')?.addEventListener('click', async () => {
     try {
       await wcBoot();
@@ -3093,12 +3183,16 @@ function wireGlobal() {
     const panel = $('#runtime-panel');
     if (!panel.hidden && !panel.contains(event.target) && !event.target.closest('#status-pill')) panel.hidden = true;
   });
-  $('#btn-preview-collapse').onclick = () => {
-    const app = $('#app');
-    const hidden = app.dataset.pane === 'preview-hidden';
-    app.dataset.pane = hidden ? 'preview' : 'preview-hidden';
-    $('#btn-preview-collapse').title = hidden ? 'Hide the preview' : 'Show the preview';
-    state.store.saveSettings({ pane: app.dataset.pane });
+  $('#btn-preview-collapse').onclick = () => setPreviewVisible($('#app').dataset.pane === 'preview-hidden');
+  $('#btn-preview-toggle').onclick = () => {
+    // On a phone the toggle is a pane switch: there is no room for two columns,
+    // and "hide the preview" behind a bar you cannot reach was the old dead end.
+    if (isMobile()) {
+      setPreviewVisible(true);
+      setMobilePane('preview');
+      return;
+    }
+    setPreviewVisible($('#app').dataset.pane === 'preview-hidden');
   };
   $('#btn-empty-template').onclick = () => ($('#template-sheet').hidden = false);
   wirePalette();

@@ -78,7 +78,7 @@ function platformHeaders(req, extra = {}) {
       // compiler/container SDKs used by the opt-in runtimes.
       "connect-src 'self' blob: data: https:",
       "worker-src 'self' blob:",
-      "frame-src 'self' blob: data: https:",
+      "frame-src 'self' blob: data: https://stackblitz.com https://*.stackblitz.com https://*.webcontainer-api.io https://*.staticblitz.com",
       "media-src 'self' blob: data:",
       "object-src 'none'",
       "base-uri 'none'",

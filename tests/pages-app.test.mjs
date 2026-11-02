@@ -462,8 +462,68 @@ test('settings opens as readable, sectioned panes with a model picker', { skip }
   assert.ok(body.querySelector('#set-wasm'), 'the WASM compiler switch exists');
   assert.ok(body.querySelector('#set-webcontainer'), 'the WebContainers switch exists');
   assert.ok(body.querySelector('#wc-state').textContent.length > 10, 'the sandbox explains itself on this device');
+  await wait(250);
+  const checks = body.querySelectorAll('.sandbox-check');
+  assert.ok(checks.length >= 5, `the sandbox lists the requirements it checked (saw ${checks.length})`);
+  assert.ok([...checks].some((row) => /Cross-Origin-Embedder-Policy/.test(row.textContent)), 'COEP is named');
+  assert.ok([...checks].some((row) => /SharedArrayBuffer/.test(row.textContent)), 'SharedArrayBuffer is named');
+  // jsdom is not cross-origin isolated, so boot must be disabled with a reason
+  // rather than left clickable to fail inside the SDK.
+  assert.equal(body.querySelector('#set-wc-boot').disabled, true);
   assert.ok(body.querySelector('#set-cc'), 'the compile endpoint field is still there');
 
   doc.querySelector('#btn-close-modal').click();
   assert.equal(doc.querySelector('#modal').hidden, true);
+});
+
+test('the preview can always be brought back, because its toggle is outside the column', { skip }, async () => {
+  const { window } = ctx;
+  const doc = window.document;
+  const app = doc.querySelector('#app');
+  const toggle = doc.querySelector('#btn-preview-toggle');
+  const column = doc.querySelector('#preview-col');
+
+  assert.ok(toggle, 'the tab bar has a Preview toggle');
+  assert.ok(column, 'the preview column exists');
+  assert.equal(toggle.closest('#preview-col'), null, 'the toggle must not live inside the thing it hides');
+  assert.equal(toggle.getAttribute('aria-pressed'), 'true');
+
+  toggle.click();
+  await wait(60);
+  assert.equal(app.dataset.pane, 'preview-hidden', 'clicking hides the preview');
+  assert.equal(toggle.getAttribute('aria-pressed'), 'false');
+
+  // The dead end this guards against: hiding the column used to remove the only
+  // control that could show it again.
+  toggle.click();
+  await wait(60);
+  assert.equal(app.dataset.pane, undefined, 'clicking again brings it back (default state, no attribute)');
+  assert.equal(toggle.getAttribute('aria-pressed'), 'true');
+  assert.equal(doc.querySelector('#btn-preview-collapse').title, 'Hide the preview', 'both controls agree');
+
+  // The collapse control inside the bar and the toggle outside it stay in sync.
+  doc.querySelector('#btn-preview-collapse').click();
+  await wait(60);
+  assert.equal(app.dataset.pane, 'preview-hidden');
+  assert.equal(toggle.getAttribute('aria-pressed'), 'false');
+  toggle.click();
+  await wait(60);
+  assert.equal(app.dataset.pane, undefined);
+});
+
+test('hiding the preview is a desktop arrangement, not a phone one', { skip }, async () => {
+  const css = fs.readFileSync(path.join(ROOT, 'web', 'app.css'), 'utf8');
+  // Static audit: the rule that zeroes the preview column must sit inside a
+  // min-width media query, or a phone restoring a desktop preference gets a
+  // blank screen behind the Preview tab.
+  const start = css.indexOf(".app[data-pane='preview-hidden'] .workspace");
+  assert.ok(start > 0, 'the rule exists');
+  const before = css.slice(0, start);
+  const openMedia = [...before.matchAll(/@media[^{]+\{/g)].length;
+  const closed = (before.match(/\}/g) || []).length;
+  // Count braces to find whether we are still inside a media block at that point.
+  const depth = before.split('{').length - before.split('}').length;
+  assert.ok(openMedia > 0 && depth > 0, 'the preview-hidden rule is scoped to a media query');
+  assert.match(css, /@media \(min-width: 821px\)/, 'scoped to the two-column layout');
+  assert.match(css, /\.app\[data-mobile-pane='preview'\] \.preview-col \{[^}]*opacity: 1/, 'the phone pane forces the preview visible');
 });

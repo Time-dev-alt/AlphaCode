@@ -38,6 +38,7 @@
     "@fontsource-variable/geist": "^5.3.0",
     "@fontsource-variable/geist-mono": "^5.3.0",
     "@fontsource/instrument-serif": "^5.3.0",
+    "@webcontainer/api": "^1.5.1",
     "buffer": "^6.0.3",
     "esbuild": "^0.28.2",
     "fflate": "^0.8.2",

@@ -53,8 +53,10 @@ export class NodeRuntime {
     this.builtins = createBuiltins({
       fs: this.fs,
       process: this.process,
-      stdout: onStdout,
-      stderr: onStderr,
+      // Late-bound: `NodeSession` swaps these per run to collect output, and a
+      // captured reference would send every `console.log` to the wrong place.
+      stdout: (text) => this.onStdout(text),
+      stderr: (text) => this.onStderr(text),
       resolve: (spec, from) => this.resolve(spec, from),
     });
     installBuiltins(this.builtins);

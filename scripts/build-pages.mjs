@@ -33,6 +33,15 @@ const log = (...a) => console.log('[build:pages]', ...a);
 const sha = (buf) => crypto.createHash('sha256').update(buf).digest('hex').slice(0, 8);
 const sri = (buf) => `sha384-${crypto.createHash('sha384').update(buf).digest('base64')}`;
 
+async function dirSize(dir) {
+  let total = 0;
+  for (const entry of await fsp.readdir(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    total += entry.isDirectory() ? await dirSize(full) : (await fsp.stat(full)).size;
+  }
+  return total;
+}
+
 async function bundle(entry = path.join(ROOT, 'web', 'app', 'main.js'), extraDefine = {}) {
   const esbuild = await import('esbuild');
   const outdir = path.join(DIST, 'assets');
@@ -128,6 +137,21 @@ async function main() {
   for (const file of ['manifest.webmanifest', 'favicon.svg']) {
     const from = path.join(ROOT, 'public', file);
     if (fs.existsSync(from)) await fsp.copyFile(from, path.join(DIST, file));
+  }
+
+  // ---- optional: the full npm engine -----------------------------------
+  // Vendored by `npm run vendor:nodepod`, never committed. Copied verbatim
+  // because it resolves its own workers relative to its module URL, and loaded
+  // lazily — a deployment without it just uses the built-in installer.
+  const nodepodDir = path.join(ROOT, 'public', 'nodepod');
+  if (fs.existsSync(path.join(nodepodDir, 'index.mjs'))) {
+    const target = path.join(DIST, 'nodepod');
+    await fsp.cp(nodepodDir, target, { recursive: true });
+    const size = (await dirSize(target)) / 1024 / 1024;
+    const manifest = JSON.parse(await fsp.readFile(path.join(nodepodDir, 'manifest.json'), 'utf8').catch(() => '{}'));
+    log(`nodepod ${manifest.version || ''} (${size.toFixed(1)} MB) → /nodepod — full npm engine`);
+  } else {
+    log('nodepod not vendored — npm uses the built-in resolver (npm run vendor:nodepod to enable)');
   }
 
   // ---- fonts -----------------------------------------------------------

@@ -78,6 +78,12 @@ for. What we ship is a static bundle you can put on any static host.
 
 ---
 
+The file tree uses a **file-type glyph** per language — a page outline with a
+mark inside, tinted by family (JavaScript, TypeScript, HTML, CSS, JSON, images,
+archives, fonts, config, databases) — and every button, menu item, mount state
+and activity step is a hand-drawn outline icon from one set, drawn on a 24px
+grid with a consistent stroke. No icon font, no emoji, no mixing.
+
 ## The product loop (Lovable-shaped, but yours)
 
 1. **Pick a template or describe it.** "A landing page for a coffee subscription."
@@ -203,6 +209,67 @@ Verified end-to-end against the real registry: `npm install is-number ms` →
 scripts that need a real OS, and packages that reach for sockets or threads.
 Those fail with a message naming the reason instead of a stack trace.
 
+### Two engines, and what the second one adds
+
+The built-in resolver above is small and predictable: a flat dependency list
+against the registry. It stays fast because it does not try to be npm.
+
+**Full npm** is [Nodepod](https://github.com/R1ck404/Nodepod) — the real thing
+in a worker: semver range resolution, transitive trees, `devDependencies`,
+optional and peer dependencies, npm workspaces, lockfile round-tripping and
+`.bin` stubs. Install with it from **Settings → Packages → Install engine**, or:
+
+```bash
+npm run vendor:nodepod   # fetches ~5 MB into public/nodepod/ (not committed)
+npm run build
+```
+
+It is vendored rather than loaded from a CDN, so a deployment serves its own
+copy and nothing is fetched from a third party at runtime. It is imported the
+first time it is needed, so the ~5 MB never loads for someone who never installs
+a package. If it is absent — a deployment without the vendoring step — the
+built-in resolver takes over and says so, instead of failing.
+
+Packages land in the project's `node_modules`, which means they are visible in
+the file tree (folded into one row, with a package count), openable in the
+editor, mirrored into a mounted folder, and resolvable by the Node runtime in
+the same session *and* after a reload.
+
+```bash
+npm install debug@4.3.4
+node -e "console.log(typeof require('debug'))"   # function
+```
+
+`npm run <script>` works. A script that tries to *listen* on a port does not —
+a browser tab cannot be a server, and it says that instead of hanging.
+
+Nothing about the install reaches us: the registry request goes from your tab to
+the registry you configured in Settings (the default is `registry.npmjs.org`; a
+mirror or a private registry's read URL also works).
+
+## Mount a folder that already exists
+
+The File System Access API gives a page a durable handle to a real directory.
+AlphaCode uses it to open **a project you already have**, instead of only files
+that were born in the tab:
+
+- **Files → Add → Mount a folder…**. The folder is copied into the project
+  (skipping `node_modules`, `.git`, `dist`, `build`, and friends; up to 5,000
+  files / 64 MB), so the editor, the preview, the agent and the Node runtime all
+  work on it.
+- **Every write goes back to the folder.** Editing a file, running the agent, or
+  `npm install` writes through to the real directory. It is a two-way mount, not
+  an import.
+- **The handle is remembered** in IndexedDB, so the folder reconnects on the next
+  visit — the browser asks once for permission, then it is automatic.
+- **Pull changes back** when something changed on disk outside the app, or push
+  the project out wholesale from the folder menu.
+- **Disconnect** at any time; the files stay in the project.
+
+Chrome and Edge have this API. Firefox and Safari do not, and there the same
+menu offers drag-and-drop of a folder, which copies it once. Both paths are
+tested; the mount logic itself has no browser dependency, so it is covered by
+the test suite against handles shaped exactly like the real ones.
 ## C, C++, Rust — the honest version
 
 | | Status |

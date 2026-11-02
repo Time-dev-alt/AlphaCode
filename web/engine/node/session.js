@@ -8,18 +8,22 @@
 import { NodeRuntime } from './runtime.js';
 import { NodeFS } from './vfs.js';
 import { install, bindRuntimeWriter, humanBytes } from './npm.js';
+import { installWithNodepod, NODEPOD_VERSION } from './nodepod.js';
 import { fromBytes } from './vfs.js';
 
 const SKIP_DIRS = new Set(['node_modules', '.git', '.cache', '.next', 'dist', 'build', 'coverage', '__pycache__']);
 
 export class NodeSession {
-  constructor({ fs, projectId, onStdout = () => {}, onStderr = () => {}, env = {}, edge = '/api/npm' }) {
+  constructor({ fs, projectId, onStdout = () => {}, onStderr = () => {}, env = {}, edge = '/api/npm', npmEngine = 'builtin', npmRegistry = '' }) {
     this.fs = fs;
     this.projectId = projectId;
     this.edge = edge;
     this.onStdout = onStdout;
     this.onStderr = onStderr;
     this.env = env;
+    this.npmEngine = npmEngine === 'nodepod' ? 'nodepod' : 'builtin';
+    // A mirror or a private registry; empty means the public one.
+    this.npmRegistry = String(npmRegistry || '').trim();
     this.runtime = null;
     this.hydratedAt = 0;
     this.buffer = '';
@@ -163,6 +167,11 @@ export class NodeSession {
    * @returns {Promise<{code:number, output:string}>}
    */
   async npmInstall({ add = [], remove = [], log = () => {} } = {}) {
+    if (this.npmEngine === 'nodepod') {
+      const full = await this.npmInstallFull({ add, remove, log });
+      if (full) return full;
+      log('npm: the full engine is unavailable — using the built-in resolver\n');
+    }
     const started = Date.now();
     const runtime = await this.syncFromProject();
     const existing = (await this.readPackageJson()) || { name: slug(this.projectId), version: '0.0.0', dependencies: {} };
@@ -193,6 +202,61 @@ export class NodeSession {
       ...(result.warnings || []).map((w) => `npm WARN ${w}`),
       `added ${result.installed.length} packages in ${seconds}s (${humanBytes(totalBytes)} extracted, ${written.length} files written)`,
       `resolved by the ${result.source === 'edge' ? 'edge cache' : 'browser'}${result.source === 'edge' ? ' — later installs are one request' : ''}`,
+    ];
+    return { code: 0, output: `${lines.join('\n')}\n` };
+  }
+
+  /**
+   * `npm install` through Nodepod's installer: real semver ranges, transitive
+   * trees, dev/optional/peer dependencies, workspaces and a lockfile.
+   *
+   * Files land in the runtime first (so `require` works in the same session)
+   * and then flush through the project store, which is also what the folder
+   * mount mirrors — so an install shows up in a mounted folder too.
+   *
+   * Returns null when the engine is not installed, so the caller can fall back.
+   */
+  async npmInstallFull({ add = [], remove = [], log = () => {} } = {}) {
+    const started = Date.now();
+    const runtime = await this.syncFromProject();
+    const existing = (await this.readPackageJson()) || { name: slug(this.projectId), version: '0.0.0', dependencies: {} };
+    let lastLine = '';
+    let result;
+    try {
+      result = await installWithNodepod({
+        packageJson: existing,
+        add,
+        remove,
+        ...(this.npmRegistry ? { registry: this.npmRegistry } : {}),
+        onProgress: (message) => {
+          const line = String(message).trim();
+          if (line && line !== lastLine) {
+            lastLine = line;
+            log(`${line}\n`);
+          }
+        },
+        write: async (relPath, content) => {
+          // Text stays text so the file tree and the editor can open it; the
+          // runtime accepts either and the flush path preserves the type.
+          runtime.fs.writeFile(`/app/${relPath}`, content);
+        },
+      });
+    } catch (err) {
+      if (err?.code === 'NODEPOD_MISSING') return null;
+      return { code: 1, output: `npm ERR! ${err.message}\n` };
+    }
+
+    // `npm uninstall` has no verb in the installer; drop the directory instead.
+    for (const name of remove) {
+      const dir = `/app/node_modules/${name}`;
+      if (runtime.fs.isDir(dir)) runtime.fs.rmrf(dir);
+    }
+    runtime.fs.writeFile('/app/package.json', `${JSON.stringify(result.packageJson, null, 2)}\n`);
+    const written = await this.flush();
+    const seconds = ((Date.now() - started) / 1000).toFixed(1);
+    const lines = [
+      `added ${result.installed.length} package${result.installed.length === 1 ? '' : 's'} in ${seconds}s (${humanBytes(result.bytes)} extracted, ${written.length} files written)`,
+      `full resolver — Nodepod ${NODEPOD_VERSION}: real semver, transitive, dev and optional dependencies`,
     ];
     return { code: 0, output: `${lines.join('\n')}\n` };
   }

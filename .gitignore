@@ -17,3 +17,6 @@ coverage/
 
 # research screenshots pulled into the workspace during design work
 image-search/
+
+# Vendored third-party runtime (npm run vendor:nodepod)
+public/nodepod/

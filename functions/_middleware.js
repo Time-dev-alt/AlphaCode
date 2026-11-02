@@ -16,7 +16,11 @@ const CSP = [
   // an allowlist would silently break custom OpenAI-compatible base URLs.
   "connect-src 'self' blob: data: https:",
   "worker-src 'self' blob:",
-  "frame-src 'self' blob: data:",
+  // `srcdoc` previews and the WebContainers sandbox. The SDK embeds a hidden
+  // iframe from stackblitz.com/headless; blocking it is the difference between
+  // "npm install works" and a boot that fails inside the SDK. Explicit hosts,
+  // never `https:` — the frame is a whole separate browsing context.
+  "frame-src 'self' blob: data: https://stackblitz.com https://*.stackblitz.com https://*.webcontainer-api.io https://*.staticblitz.com",
   "media-src 'self' blob: data:",
   "object-src 'none'",
   "base-uri 'none'",

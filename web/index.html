@@ -113,6 +113,11 @@
         <button class="tab" data-view="deploy" role="tab"><span data-icon="rocket" data-icon-size="14"></span><span>Ship</span></button>
         <div class="grow"></div>
         <button class="icon-btn sm" id="btn-preview" title="Rebuild the preview (⌘R)" aria-label="Rebuild preview" data-icon="refresh" data-icon-size="14"></button>
+        <!-- The preview is a column, not a view, so its toggle lives here rather
+             than inside the column: a hidden column cannot hold its own undo. -->
+        <button class="tab tab-preview" id="btn-preview-toggle" aria-pressed="true" title="Hide the preview" aria-controls="preview-col">
+          <span data-icon="eye" data-icon-size="14"></span><span class="tab-label">Preview</span>
+        </button>
       </nav>
 
       <!-- chat -->

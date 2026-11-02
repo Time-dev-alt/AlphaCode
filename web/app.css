@@ -987,13 +987,18 @@ code {
 .app[data-layout='code'] .workspace {
   grid-template-columns: minmax(0, 1fr) minmax(0, 440px);
 }
-.app[data-pane='preview-hidden'] .workspace {
-  grid-template-columns: minmax(0, 1fr) 0;
-}
-.app[data-pane='preview-hidden'] .preview-col {
-  opacity: 0;
-  pointer-events: none;
-  border: 0;
+/* Hiding the preview is a desktop idea: on a phone the preview is a pane you
+   switch to, so `preview-hidden` must never blank it. The rules are scoped to
+   the two-column layout for exactly that reason. */
+@media (min-width: 821px) {
+  .app[data-pane='preview-hidden'] .workspace {
+    grid-template-columns: minmax(0, 1fr) 0;
+  }
+  .app[data-pane='preview-hidden'] .preview-col {
+    opacity: 0;
+    pointer-events: none;
+    border: 0;
+  }
 }
 .work-col {
   display: flex;
@@ -1054,6 +1059,31 @@ code {
   background: var(--accent);
   box-shadow: 0 0 12px 0 rgba(255, 176, 46, 0.6);
 }
+/* The preview toggle is a tab that behaves like a switch: it is the one control
+   that can bring the column back, so it must never live inside the column. */
+.tab-preview {
+  margin-left: 2px;
+  border: 1px solid transparent;
+  color: var(--fg-2);
+}
+.tab-preview[aria-pressed='true'] {
+  color: var(--fg);
+  background: var(--raise);
+  border-color: var(--line-2);
+}
+.tab-preview[aria-pressed='false'] {
+  color: var(--fg-4);
+}
+.tab-preview[aria-pressed='false']:hover {
+  color: var(--fg);
+}
+@media (max-width: 560px) {
+  /* On a narrow bar the icon carries it; the label would push Ship off-screen. */
+  .tab-preview .tab-label {
+    display: none;
+  }
+}
+
 .tab-count {
   font-size: 10.5px;
   font-family: var(--mono);
@@ -4307,6 +4337,8 @@ select {
   }
   .app[data-mobile-pane='preview'] .preview-col {
     display: flex;
+    opacity: 1;
+    pointer-events: auto;
   }
   .app[data-mobile-pane='preview'] .work-col {
     display: none;
@@ -5331,5 +5363,59 @@ select {
   }
   .set-panes {
     padding: 12px 12px 20px;
+  }
+}
+
+/* ------------------------------------------------------ node sandbox panel -- */
+/*
+ * A boot that fails has four possible causes that look identical from the
+ * outside ("it just doesn't load"). Listing the checks with pass/fail marks is
+ * the difference between a bug report and a fix the user can perform.
+ */
+.sandbox-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 2px 0 8px;
+  padding: 0;
+  list-style: none;
+}
+.sandbox-check {
+  display: grid;
+  grid-template-columns: 16px 132px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: var(--r-sm);
+  background: var(--bg-veil);
+  border: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--fg-3);
+}
+.sandbox-check .sandbox-mark {
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+}
+.sandbox-check.ok .sandbox-mark {
+  color: var(--ok);
+}
+.sandbox-check.fail .sandbox-mark {
+  color: var(--warn);
+}
+.sandbox-check .sandbox-label {
+  color: var(--fg);
+  font-weight: 550;
+}
+.sandbox-check .sandbox-detail {
+  color: var(--fg-2);
+  line-height: 1.5;
+}
+@media (max-width: 620px) {
+  .sandbox-check {
+    grid-template-columns: 16px minmax(0, 1fr);
+  }
+  .sandbox-check .sandbox-detail {
+    grid-column: 2;
   }
 }

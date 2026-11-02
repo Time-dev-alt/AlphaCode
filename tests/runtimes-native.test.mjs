@@ -21,7 +21,18 @@ import {
   ToolchainError,
   TOOLCHAINS,
 } from '../web/engine/wasm-toolchains.js';
-import { toFileTree, readTree, webcontainerDiagnosis, webcontainerSupported } from '../web/engine/node/webcontainer.js';
+import {
+  toFileTree,
+  readTree,
+  webcontainerDiagnosis,
+  webcontainerSupported,
+  inspectSandbox,
+  setIsolationCookie,
+  ISOLATION_COOKIE,
+  WEBCONTAINER_VERSION,
+  bootWebContainer,
+  SandboxUnavailable,
+} from '../web/engine/node/webcontainer.js';
 
 const WASM_MAGIC = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
 
@@ -172,4 +183,113 @@ test('the sandbox diagnosis is explicit outside a browser', () => {
   const diagnosis = webcontainerDiagnosis();
   assert.equal(diagnosis.ok, false);
   assert.ok(diagnosis.reason.length > 4);
+});
+
+/* ------------------------------------------------- sandbox preflight -- */
+
+/** A fake window with the flags the SDK reads. */
+function fakeWindow({ isolated = true, sab = true, ua = 'Mozilla/5.0 (Macintosh) Chrome/141.0 Safari/537.36', framed = false, secure = true } = {}) {
+  const win = {
+    crossOriginIsolated: isolated,
+    isSecureContext: secure,
+    navigator: { userAgent: ua },
+    location: { href: 'https://alphacode.example/app' },
+    self: {},
+  };
+  win.top = framed ? {} : win.self;
+  if (sab) win.SharedArrayBuffer = function SharedArrayBuffer() {};
+  return win;
+}
+
+const headers = (map) => async () => ({ headers: { get: (name) => map[name.toLowerCase()] || null } });
+
+test('a fully isolated Chromium tab passes every sandbox check', async () => {
+  const report = await inspectSandbox({
+    win: fakeWindow(),
+    fetchImpl: headers({ 'cross-origin-embedder-policy': 'credentialless', 'cross-origin-opener-policy': 'same-origin' }),
+  });
+  assert.equal(report.ok, true, report.hint);
+  assert.equal(report.coep, 'credentialless');
+  assert.deepEqual(report.blockers, []);
+  assert.deepEqual(report.checks.map((c) => c.id), ['sdk', 'secure', 'sab', 'browser', 'coop', 'coep', 'isolated']);
+});
+
+test('a page without the isolation headers names both missing headers', async () => {
+  const report = await inspectSandbox({
+    win: fakeWindow({ isolated: false }),
+    fetchImpl: headers({ 'cross-origin-opener-policy': 'same-origin-allow-popups' }),
+  });
+  assert.equal(report.ok, false);
+  const failed = report.blockers.map((b) => b.id);
+  assert.deepEqual(failed, ['coop', 'coep', 'isolated']);
+  assert.match(report.hint, /Node sandbox/);
+});
+
+test('the boot is disabled with a reason for Safari', async () => {
+  const report = await inspectSandbox({
+    win: fakeWindow({ ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) Version/18.0 Safari/605.1.15' }),
+    fetchImpl: headers({ 'cross-origin-embedder-policy': 'require-corp', 'cross-origin-opener-policy': 'same-origin' }),
+  });
+  assert.equal(report.ok, false);
+  assert.ok(report.blockers.some((b) => b.id === 'browser'));
+  assert.match(report.blockers.find((b) => b.id === 'browser').detail, /Safari/);
+});
+
+test('require-corp is accepted, and reported so boot can match it', async () => {
+  const report = await inspectSandbox({
+    win: fakeWindow(),
+    fetchImpl: headers({ 'cross-origin-embedder-policy': 'require-corp', 'cross-origin-opener-policy': 'same-origin' }),
+  });
+  assert.equal(report.ok, true);
+  assert.equal(report.coep, 'require-corp');
+});
+
+test('an embedded tab that is not isolated is told to open its own tab', async () => {
+  const report = await inspectSandbox({
+    win: fakeWindow({ isolated: false, framed: true }),
+    fetchImpl: headers({ 'cross-origin-opener-policy': 'same-origin-allow-popups' }),
+  });
+  assert.equal(report.framed, true);
+  assert.equal(report.isolated, false);
+  assert.match(report.hint, /own (browser )?tab/);
+});
+
+test('an unreachable header probe still reaches a verdict', async () => {
+  const report = await inspectSandbox({
+    win: fakeWindow(),
+    fetchImpl: async () => {
+      throw new TypeError('offline');
+    },
+  });
+  assert.equal(report.ok, true, 'the crossOriginIsolated flag is the source of truth');
+  assert.equal(report.coep, '');
+});
+
+test('the switch writes the cookie the middleware reads', () => {
+  const doc = { cookie: '' };
+  setIsolationCookie(true, doc);
+  assert.match(doc.cookie, new RegExp(`^${ISOLATION_COOKIE}=1;`));
+  setIsolationCookie(false, doc);
+  assert.match(doc.cookie, new RegExp(`^${ISOLATION_COOKIE}=;`));
+});
+
+test('the SDK version is pinned', () => {
+  assert.match(WEBCONTAINER_VERSION, /^\d+\.\d+\.\d+$/);
+});
+
+test('booting in a tab that is not isolated fails with the blockers, not an SDK stack', async () => {
+  const inspect = await inspectSandbox({
+    win: fakeWindow({ isolated: false }),
+    fetchImpl: headers({ 'cross-origin-opener-policy': 'same-origin-allow-popups' }),
+  });
+  await assert.rejects(
+    () => bootWebContainer({ files: { 'index.html': 'hi' }, inspect }),
+    (err) => {
+      assert.ok(err instanceof SandboxUnavailable);
+      assert.match(err.message, /Cross-Origin-Embedder-Policy/);
+      assert.ok(err.blockers.length >= 2);
+      assert.match(err.hint, /Settings → Runtimes/);
+      return true;
+    },
+  );
 });

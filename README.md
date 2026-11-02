@@ -338,13 +338,19 @@ Next build, an Express API — turn on **Settings → Runtimes → Node sandbox*
    answers with `Cross-Origin-Opener-Policy: same-origin` and
    `Cross-Origin-Embedder-Policy: credentialless`, which is what makes
    `crossOriginIsolated` true.
-2. **Boot Node sandbox** downloads `@webcontainer/api` (CDN, cached) and mounts
-   the project.
+2. **Boot Node sandbox** uses the bundled `@webcontainer/api` (shipped with the
+   app, so no CDN import and no second origin to block) and mounts the project.
+   Before booting, the panel checks the four things a boot needs — secure
+   context, `SharedArrayBuffer`, the two headers, and a browser that supports it
+   — and names whichever one is missing instead of failing inside the SDK.
 3. **npm install** and **npm run dev** run inside the container; `server-ready`
    points the preview iframe at the real dev-server URL, and files the container
    writes are mirrored back into the project.
 
-Safari cannot boot WebContainers yet, and the UI says so instead of hanging.
+Safari cannot boot WebContainers yet, and the UI says so instead of hanging. The
+CSP deliberately allows `frame-src` from `stackblitz.com` — the SDK embeds a
+hidden `/headless` iframe there, and blocking it is a boot that fails for a
+reason nobody can see.
 While the sandbox is on, OAuth pop-ups open as tabs — that is the COOP trade-off,
 and the switch turns it back off.
 

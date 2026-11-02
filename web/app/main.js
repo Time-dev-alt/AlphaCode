@@ -17,6 +17,9 @@ import { getGovernor } from '../engine/agent/governor.js';
 import { toModelMessages } from '../engine/agent/history.js';
 import { renderScaffold } from '../engine/agent/scaffolds.js';
 import { FREE_MODELS, PROVIDERS, GUEST_MODEL } from '../engine/providers.js';
+import { fetchModels, mergeCatalog } from '../engine/agent/catalog.js';
+import { toolchainStatus } from '../engine/wasm-toolchains.js';
+import { bootWebContainer, installInContainer, startDevInContainer, webcontainerSupported, webcontainerDiagnosis } from '../engine/node/webcontainer.js';
 import { runPython, pipInstall, loadPython, pythonReady } from '../engine/python.js';
 import { createNodeSession } from '../engine/node/session.js';
 import { nodepodStatus, NODEPOD_VERSION } from '../engine/node/nodepod.js';
@@ -94,6 +97,9 @@ const state = {
   jobs: null,
   mcp: { clients: [], tools: [], errors: [] },
   hooks: null,
+  // WebContainers state: the instance lives for the tab, the URL in the preview.
+  wc: null,
+  containerUrl: '',
 };
 
 
@@ -381,6 +387,7 @@ function wirePalette() {
 
 function openShortcuts() {
   $('#modal-title').textContent = 'Shortcuts';
+  $('#modal-body').closest('.modal-card')?.classList.remove('settings');
   $('#modal-body').innerHTML = `
     <section>
       <h3>Everywhere</h3>
@@ -675,14 +682,21 @@ function attachShell() {
         return {
           code: 1,
           output:
-            'cc: no C toolchain is configured.\n' +
-            '  • C/C++ needs clang+lld+sysroot (~60 MB) — set a compile endpoint in Settings → Runtime, or\n' +
-            '  • compile elsewhere (zig cc --target=wasm32-wasi) and run the .wasm here: wasm main.wasm\n',
+            `${language}: no compiler is configured.\n` +
+            '  • turn on “In-browser compilers (WASM)” in Settings → Runtimes (C, C++, Rust in this tab), or\n' +
+            '  • set a compile endpoint there, or\n' +
+            '  • compile elsewhere and run the result here: wasm main.wasm\n',
         };
       }
       try {
         const source = await state.fs.readText(state.project.id, path);
-        const wasm = await compileC({ source, language, filename: path, settings: state.settings });
+        const wasm = await compileC({
+          source,
+          language,
+          filename: path,
+          settings: state.settings,
+          onOutput: (text) => state.termView?.write?.(text),
+        });
         const out = path.replace(/\.(c|cpp|cc|cxx)$/, '.wasm');
         await state.fs.write(state.project.id, out, new Uint8Array(wasm));
         return { code: 0, output: `compiled ${path} → ${out} (${(wasm.byteLength / 1024).toFixed(0)} KB)\nrun it: wasm ${out}\n` };
@@ -703,6 +717,9 @@ function attachShell() {
 async function openProject(id) {
   state.project = await state.store.project(id);
   if (!state.project) return;
+  state.containerUrl = '';
+  const frameReset = $('#preview-frame');
+  if (frameReset) frameReset.removeAttribute('src');
   state.settings = await state.store.saveSettings({ lastProject: id });
   state.threads = await state.store.threads(id);
   state.thread = state.threads[0] || (await state.store.createThread(id, 'New session'));
@@ -1186,6 +1203,7 @@ async function send(text, options = {}) {
   activityStarted();
   state.activityProviderErrors = [];
   state.verifiedThisTurn = false;
+  state.relayNoted = false;
   pushActivity({ kind: 'think', title: 'Reading the request', state: 'run' });
   setRunning(true);
   if (isMobile()) setMobilePane('chat');
@@ -1219,7 +1237,15 @@ async function send(text, options = {}) {
       python: RUNTIME_MATRIX.python.how,
       node: RUNTIME_MATRIX.node.how,
       mcp: state.mcp.clients.map((client) => client.name),
-      c: canCompileC(state.settings) ? 'compile endpoint configured' : 'not configured (WASI binaries still run)',
+      c: canCompileC(state.settings)
+        ? state.settings.cCompilerEndpoint
+          ? 'C/C++/Rust via your compile endpoint'
+          : 'C/C++/Rust compile in the tab (WASM)'
+        : 'not configured — WASI binaries still run',
+      models: {
+        pool: (state.settings.modelPool || []).length,
+        catalog: Object.fromEntries(Object.entries(state.settings.catalog || {}).map(([provider, ids]) => [provider, ids.length])),
+      },
       deploy: { github: Boolean(state.github?.token), targets: Object.keys(DEPLOY_TARGETS) },
       storage: navigator.storage?.estimate ? 'available' : 'unknown',
     }),
@@ -1463,6 +1489,14 @@ function handleEvent(ev) {
         cooldownMs: ev.cooldownMs || 0,
         retryable: ev.retryable !== false,
       });
+      break;
+    }
+    case 'relay': {
+      // One line per turn: a device that needs the relay needs it for every
+      // request, and five identical notices is noise.
+      if (state.relayNoted) break;
+      state.relayNoted = true;
+      appendNotice(`${PROVIDERS[ev.provider]?.label || ev.provider} is answering through this site's relay — same model, no key involved.`, 'info');
       break;
     }
     case 'usage': {
@@ -1758,6 +1792,30 @@ async function runNpmInstall(extra = []) {
   return { output, failed, toastId };
 }
 
+/**
+ * Point the preview at a WebContainer dev server.
+ *
+ * A bundled `srcdoc` preview is right for static files; a Node project has a
+ * live server, so the iframe gets a real URL and the file preview stays out of
+ * the way until the sandbox is stopped.
+ */
+function showContainerPreview(url) {
+  if (!url) return;
+  state.containerUrl = url;
+  const frame = $('#preview-frame');
+  const empty = $('#preview-empty');
+  if (empty) empty.hidden = true;
+  if (frame) {
+    frame.removeAttribute('srcdoc');
+    frame.hidden = false;
+    frame.src = url;
+  }
+  const urlNode = $('#frame-url');
+  if (urlNode) urlNode.textContent = String(url).replace(/^https?:\/\//, '').replace(/\/$/, '');
+  $('#status-dot')?.classList.remove('busy');
+  toast('Real Node dev server live in the preview', 'ok', 3600);
+}
+
 function prompt() {
   const cwd = state.shell?.cwd || '';
   state.termView.write(`\u001b[1;32m/${cwd || ''}\u001b[0m \u001b[1;34m$\u001b[0m `);
@@ -1974,6 +2032,8 @@ async function handleClaimRoute() {
 
 /* -------------------------------------------------------------- settings --- */
 
+/* -------------------------------------------------------------- settings --- */
+
 /** Report whether the vendored full engine is actually on this deployment. */
 async function refreshNpmEngineState() {
   const node = document.querySelector('#npm-engine-state');
@@ -1986,74 +2046,263 @@ async function refreshNpmEngineState() {
     : `Full engine not deployed (${status.reason}). The built-in resolver keeps working.`;
 }
 
+const SETTINGS_TABS = [
+  { id: 'appearance', label: 'Appearance', icon: 'palette' },
+  { id: 'models', label: 'Models', icon: 'spark' },
+  { id: 'providers', label: 'Providers', icon: 'key' },
+  { id: 'runtimes', label: 'Runtimes', icon: 'cpu' },
+  { id: 'packages', label: 'Packages', icon: 'package' },
+  { id: 'mcp', label: 'MCP', icon: 'plug' },
+  { id: 'hooks', label: 'Hooks', icon: 'route' },
+  { id: 'data', label: 'Data', icon: 'hard-drive' },
+];
+
+/** One card inside a pane: a heading, a one-line explainer and the fields. */
+const settingsCard = (title, hint, body) => `
+  <div class="set-card">
+    <div class="set-card-head"><h3>${title}</h3>${hint ? `<p class="set-hint">${hint}</p>` : ''}</div>
+    <div class="set-card-body">${body}</div>
+  </div>`;
+
+const modelPool = () => (Array.isArray(state.settings.modelPool) ? state.settings.modelPool : []);
+
+const poolHas = (provider, id) =>
+  modelPool().some((entry) => (typeof entry === 'string' ? entry === id : entry.id === id && (!entry.provider || entry.provider === provider)));
+
+/** The catalog for a provider: curated entries merged with whatever was fetched. */
+function catalogFor(provider) {
+  const live = state.settings.catalog?.[provider] || [];
+  return mergeCatalog(provider, live.map((id) => ({ id })));
+}
+
+/** Every model the picker offers as a default, grouped by provider. */
+function modelChoices() {
+  const groups = new Map();
+  const add = (provider, model) => {
+    if (!groups.has(provider)) groups.set(provider, new Map());
+    const bucket = groups.get(provider);
+    if (!bucket.has(model.id)) bucket.set(model.id, model);
+  };
+  for (const [provider, list] of Object.entries(FREE_MODELS)) for (const model of list) add(provider, model);
+  for (const entry of modelPool()) {
+    const provider = typeof entry === 'string' ? Object.keys(FREE_MODELS).find((p) => FREE_MODELS[p].some((m) => m.id === entry)) : entry.provider;
+    if (!provider) continue;
+    const model = catalogFor(provider).find((m) => m.id === (typeof entry === 'string' ? entry : entry.id));
+    if (model) add(provider, model);
+  }
+  for (const [provider, entry] of Object.entries(state.settings.keys || {})) {
+    if (entry?.model && PROVIDERS[provider]) add(provider, { id: entry.model, name: entry.model });
+  }
+  return groups;
+}
+
+function renderDefaultModelSelect() {
+  const select = $('#set-model');
+  if (!select) return;
+  const groups = modelChoices();
+  const known = [...groups.values()].some((bucket) => bucket.has(state.model));
+  select.innerHTML =
+    (known ? '' : `<option value="${escapeHtml(state.model)}" selected>${escapeHtml(state.model)}</option>`) +
+    [...groups.entries()]
+      .map(
+        ([provider, bucket]) =>
+          `<optgroup label="${escapeHtml(PROVIDERS[provider]?.label || provider)}">${[...bucket.values()]
+            .map((model) => `<option value="${escapeHtml(model.id)}" ${state.model === model.id ? 'selected' : ''}>${escapeHtml(model.name || model.id)}</option>`)
+            .join('')}</optgroup>`,
+      )
+      .join('');
+}
+
+/**
+ * The model picker.
+ *
+ * Two different questions live here, and mixing them is why model pickers are
+ * usually confusing:
+ *   • **Which model answers now?** — the select above, one choice, saved as
+ *     `settings.model`.
+ *   • **Which models may be tried?** — these checkboxes. A ticked model joins
+ *     the fallback chain (`settings.modelPool`), so a router that refuses one
+ *     model walks to the next ticked one inside the same request instead of
+ *     failing the turn. Nothing ticked means "let the ranking decide".
+ */
+function renderModelPicker(host = $('#model-picker')) {
+  if (!host) return;
+  const providers = ['kilo', 'opencode'];
+  for (const id of Object.keys(state.settings.keys || {})) if (PROVIDERS[id] && !providers.includes(id) && !PROVIDERS[id].offline) providers.push(id);
+
+  host.innerHTML = providers
+    .map((provider) => {
+      const live = Boolean(state.settings.catalog?.[provider]?.length);
+      const models = catalogFor(provider);
+      return `<div class="model-group">
+        <div class="model-group-head">
+          <strong>${escapeHtml(PROVIDERS[provider]?.label || provider)}</strong>
+          <span class="tag ${live ? 'ok' : ''}">${live ? 'live' : 'curated'}</span>
+        </div>
+        <div class="model-rows">
+          ${models
+            .map(
+              (model) => `<div class="model-row ${poolHas(provider, model.id) ? 'on' : ''}">
+                <label class="model-check" title="Try this model before the ranked fallbacks">
+                  <input type="checkbox" data-pool-provider="${escapeHtml(provider)}" data-pool-model="${escapeHtml(model.id)}" ${poolHas(provider, model.id) ? 'checked' : ''}>
+                </label>
+                <div class="model-meta">
+                  <span class="model-name">${escapeHtml(model.name || model.id)}</span>
+                  <span class="model-id">${escapeHtml(model.id)}</span>
+                </div>
+                ${model.context ? `<span class="model-ctx">${Math.round(model.context / 1000)}K</span>` : ''}
+                <button type="button" class="btn xs" data-use-model="${escapeHtml(model.id)}" data-use-provider="${escapeHtml(provider)}">Use</button>
+              </div>`,
+            )
+            .join('')}
+        </div>
+      </div>`;
+    })
+    .join('');
+
+  host.querySelectorAll('[data-pool-model]').forEach((input) => {
+    input.onchange = async () => {
+      const provider = input.dataset.poolProvider;
+      const id = input.dataset.poolModel;
+      const rest = modelPool().filter((entry) => (typeof entry === 'string' ? entry !== id : !(entry.id === id && entry.provider === provider)));
+      const next = input.checked ? [...rest, { provider, id }] : rest;
+      state.settings = await state.store.saveSettings({ modelPool: next });
+      input.closest('.model-row')?.classList.toggle('on', input.checked);
+      renderDefaultModelSelect();
+      toast(input.checked ? `Will try ${id}` : `${id} removed from the fallback chain`, 'info', 2200);
+    };
+  });
+
+  host.querySelectorAll('[data-use-model]').forEach((button) => {
+    button.onclick = async () => {
+      state.model = button.dataset.useModel;
+      state.settings = await state.store.saveSettings({ model: state.model });
+      renderDefaultModelSelect();
+      renderChrome();
+      toast(`Default model: ${state.model}`, 'ok', 2600);
+    };
+  });
+}
+
+/** Ask every reachable provider for its catalog, then redraw the picker. */
+async function fetchModelCatalog({ onStatus = () => {} } = {}) {
+  const targets = ['kilo', 'opencode'];
+  for (const [id, entry] of Object.entries(state.settings.keys || {})) {
+    if (entry?.key && PROVIDERS[id] && !PROVIDERS[id].offline && !targets.includes(id)) targets.push(id);
+  }
+  const catalog = { ...(state.settings.catalog || {}) };
+  const report = [];
+  for (const provider of targets) {
+    const meta = PROVIDERS[provider];
+    onStatus(`asking ${meta?.label || provider}…`);
+    const result = await fetchModels({ provider, baseUrl: meta?.baseUrl || '', key: state.settings.keys?.[provider]?.key || '' });
+    const models = mergeCatalog(provider, result.models);
+    if (result.models.length) catalog[provider] = models.map((m) => m.id);
+    report.push({
+      provider,
+      label: meta?.label || provider,
+      count: result.models.length,
+      source: result.models.length ? (result.relayed ? 'live · relay' : 'live') : 'curated',
+      error: result.error,
+    });
+  }
+  state.settings = await state.store.saveSettings({ catalog });
+  onStatus(
+    report
+      .map((row) => `${row.label}: ${row.count ? `${row.count} models (${row.source})` : row.error || 'curated list'}`)
+      .join(' · '),
+  );
+  renderModelPicker();
+  return report;
+}
+
 function openSettings() {
   const body = $('#modal-body');
   const heading = $('#modal-title');
   if (heading) heading.textContent = 'Settings';
+  const card = body.closest('.modal-card');
+  if (card) card.classList.add('settings');
+
   const keys = state.settings.keys || {};
-  const rows = Object.values(PROVIDERS)
+  const providerRows = Object.values(PROVIDERS)
     .filter((p) => !p.offline)
     .map(
-      (p) => `<div class="field">
-        <label>${escapeHtml(p.label)} ${p.keyless ? '<span class="tag">keyless fallback</span>' : ''}</label>
+      (p) => `<div class="field provider-field">
+        <label for="key-${p.id}">${escapeHtml(p.label)} ${p.keyless ? '<span class="tag">keyless fallback</span>' : ''}</label>
         <div class="row">
-          <input type="password" data-key="${p.id}" placeholder="${p.keyless ? 'optional' : 'API key'}" value="${keys[p.id]?.key ? '••••••••' : ''}" autocomplete="off">
-          <input type="text" data-model="${p.id}" placeholder="model (optional)" value="${escapeHtml(keys[p.id]?.model || '')}">
+          <input id="key-${p.id}" type="password" data-key="${p.id}" placeholder="${p.keyless ? 'optional — the free router needs no key' : 'API key'}" value="${keys[p.id]?.key ? '••••••••' : ''}" autocomplete="off">
+          <input type="text" data-model="${p.id}" placeholder="model (optional)" value="${escapeHtml(keys[p.id]?.model || '')}" spellcheck="false">
         </div>
-        ${p.docs ? `<div class="hint">${p.note || ''} · <a href="${p.docs}" target="_blank" rel="noopener">get a key</a></div>` : ''}
+        <div class="hint">${p.note ? `${escapeHtml(p.note)} ` : ''}${p.docs ? `<a href="${p.docs}" target="_blank" rel="noopener">Get a key</a>` : ''}</div>
       </div>`,
     )
     .join('');
 
-  body.innerHTML = `
-    <section>
-      <h3>Appearance</h3>
-      <p class="hint">Everything about the workspace is stored in this browser, including how it looks.</p>
-      <div class="field"><label>Theme</label>
+  const theme = currentTheme();
+  const panes = {
+    appearance: settingsCard(
+      'Theme & layout',
+      'Everything about the workspace lives in this browser, including how it looks.',
+      `<div class="field"><label>Theme</label>
         <div class="row">
-          <button class="btn ${currentTheme() === 'dark' ? 'primary' : ''}" data-theme-set="dark" data-icon="moon" data-icon-size="14">Dark</button>
-          <button class="btn ${currentTheme() === 'light' ? 'primary' : ''}" data-theme-set="light" data-icon="sun" data-icon-size="14">Light</button>
+          <button class="btn ${theme === 'dark' ? 'primary' : ''}" data-theme-set="dark" data-icon="moon" data-icon-size="14">Dark</button>
+          <button class="btn ${theme === 'light' ? 'primary' : ''}" data-theme-set="light" data-icon="sun" data-icon-size="14">Light</button>
         </div>
       </div>
       <div class="field"><label>Layout</label>
         <div class="row">
           <button class="btn ${state.settings.layout === 'code' ? '' : 'primary'}" data-layout-set="build">Build — chat and a big preview</button>
-          <button class="btn ${state.settings.layout === 'code' ? 'primary' : ''}" data-layout-set="code">Code — files, terminal, a narrow preview</button>
+          <button class="btn ${state.settings.layout === 'code' ? 'primary' : ''}" data-layout-set="code">Code — files, terminal, narrow preview</button>
         </div>
-      </div>
-    </section>
+      </div>`,
+    ) + settingsCard(
+      'Permission mode',
+      'What the agent may do without asking. Plan mode is read-only.',
+      `<select id="set-mode">
+        <option value="default" ${state.mode === 'default' ? 'selected' : ''}>default — ask before shell &amp; deletes</option>
+        <option value="accept-edits" ${state.mode === 'accept-edits' ? 'selected' : ''}>accept edits — auto-write files</option>
+        <option value="plan" ${state.mode === 'plan' ? 'selected' : ''}>plan — read-only</option>
+        <option value="bypass" ${state.mode === 'bypass' ? 'selected' : ''}>bypass — never ask</option>
+      </select>`,
+    ),
 
-    <section>
-      <h3>Model access</h3>
-      <p class="hint">Requests go from this browser straight to the provider. Keys are stored only in this browser's IndexedDB — there is no AlphaCode server to leak them.</p>
-      <div class="field"><label>Default model</label>
-        <select id="set-model">
-          ${Object.entries(FREE_MODELS).map(([prov, models]) => `<optgroup label="${PROVIDERS[prov].label}">${models.map((m) => `<option value="${m.id}" ${state.model === m.id ? 'selected' : ''}>${escapeHtml(m.name)}</option>`).join('')}</optgroup>`).join('')}
-        </select>
-      </div>
-      <div class="field"><label>Permission mode</label>
-        <select id="set-mode">
-          <option value="default" ${state.mode === 'default' ? 'selected' : ''}>default — ask before shell & deletes</option>
-          <option value="accept-edits" ${state.mode === 'accept-edits' ? 'selected' : ''}>accept edits — auto-write files</option>
-          <option value="plan" ${state.mode === 'plan' ? 'selected' : ''}>plan — read-only</option>
-          <option value="bypass" ${state.mode === 'bypass' ? 'selected' : ''}>bypass — never ask</option>
-        </select>
-      </div>
-      <label class="check"><input type="checkbox" id="set-demo" ${state.settings.demo !== false ? 'checked' : ''}> use the offline demo model when no key works</label>
-      <div class="field"><label>Requests per turn</label>
+    models: settingsCard(
+      'Default model',
+      'The model that answers. Kilo Auto is the default because its free router keeps AlphaCode free — it picks the best free model per request.',
+      `<select id="set-model"></select>
+      <div class="row" style="margin-top:8px">
+        <button class="btn" id="set-fetch-models" data-icon="refresh" data-icon-size="14">Fetch models</button>
+        <span class="hint" id="model-fetch-status">Ask the routers what they serve right now.</span>
+      </div>`,
+    ) + settingsCard(
+      'Fallback chain',
+      'Tick every model AlphaCode may fall back to. A router that refuses one model walks to the next ticked one inside the same request — that is how one request does more work instead of becoming three failed ones.',
+      `<div id="model-picker" class="model-picker"></div>
+      <div class="hint">Nothing ticked means the ranking decides, which is the right default for most people.</div>`,
+    ) + settingsCard(
+      'Requests &amp; behaviour',
+      'Fewer requests carry more work — each one can run many tools.',
+      `<div class="field"><label>Requests per turn</label>
         <select id="set-budget">
           ${[4, 6, 8, 12, 16].map((n) => `<option value="${n}" ${(Number(state.settings.requestBudget) || 8) === n ? 'selected' : ''}>${n} request${n === 1 ? '' : 's'}</option>`).join('')}
         </select>
-        <div class="hint">How many times the agent may call the model before it pauses. Fewer requests is the single best way to stay inside a free tier — 8 finishes most tasks, and a paused turn continues with one click.</div>
+        <div class="hint">How many times the agent may call the model before it pauses. 8 finishes most tasks, and a paused turn continues with one click.</div>
       </div>
+      <label class="check"><input type="checkbox" id="set-demo" ${state.settings.demo !== false ? 'checked' : ''}> use the offline demo model when no provider answers</label>
       <label class="check"><input type="checkbox" id="set-autoverify" ${state.settings.autoVerify !== false ? 'checked' : ''}> fix preview errors automatically after a change</label>
-      <label class="check"><input type="checkbox" id="set-autocontinue" ${state.settings.autoContinue !== false ? 'checked' : ''}> keep working past the request budget while it is making progress</label>
-      <div class="fields">${rows}</div>
-    </section>
-    <section>
-      <h3>Runtimes</h3>
-      <p class="hint">Everything below executes inside this tab. First use downloads what it needs; after that it is cached.</p>
-      <div class="runtime-grid">
+      <label class="check"><input type="checkbox" id="set-autocontinue" ${state.settings.autoContinue !== false ? 'checked' : ''}> keep working past the request budget while it is making progress</label>`,
+    ),
+
+    providers: settingsCard(
+      'Your own keys',
+      'Requests go from this browser straight to the provider. Keys are stored only in this browser&rsquo;s IndexedDB — there is no AlphaCode server to leak them, and a keyed request never passes through the relay.',
+      `<div class="fields">${providerRows}</div>`,
+    ),
+
+    runtimes: settingsCard(
+      'What runs where',
+      'Everything below executes inside this tab. First use downloads what it needs; after that it is cached.',
+      `<div class="runtime-grid">
         ${Object.entries(RUNTIME_MATRIX)
           .map(([name, info]) => `<div class="runtime ${info.real ? 'real' : 'partial'}">
             <div class="row"><strong>${escapeHtml(name)}</strong>${info.real ? '<span class="tag ok">real</span>' : '<span class="tag">needs setup</span>'}</div>
@@ -2061,119 +2310,137 @@ function openSettings() {
             <div class="hint dim">${escapeHtml(info.notes)}</div>
           </div>`)
           .join('')}
-      </div>
-      <div class="field"><label>C compiler endpoint (optional)</label>
-        <input type="text" id="set-cc" placeholder="https://your-compiler.example.com/compile" value="${escapeHtml(state.settings.cCompilerEndpoint || '')}">
-        <div class="hint">C/C++ needs clang+lld+sysroot (~60 MB). Point this at a service you run, or compile elsewhere and run the .wasm with <code>wasm main.wasm</code>.</div>
+      </div>`,
+    ) + settingsCard(
+      'Native compilers — C, C++, Rust',
+      'Compiles to WebAssembly in this tab, then runs it here. Nothing is uploaded.',
+      `<label class="check"><input type="checkbox" id="set-wasm" ${state.settings.wasmCompilers ? 'checked' : ''}> enable in-browser compilers (WASM)</label>
+      <div class="hint" id="compiler-state">${escapeHtml(toolchainStatus(state.settings).detail)}</div>
+      <div class="field" style="margin-top:10px"><label for="set-cc">Compile endpoint (optional, most reliable)</label>
+        <input type="text" id="set-cc" placeholder="https://your-compiler.example.com/compile" value="${escapeHtml(state.settings.cCompilerEndpoint || '')}" spellcheck="false">
+        <div class="hint">A service you run that turns source into wasm32-wasi. It handles every language, including Rust, and keeps the tab light.</div>
       </div>
       <div class="row">
-        <button class="btn" id="set-python">${state.pythonReady ? 'Python loaded' : 'Load Python now'}</button>
-        <button class="btn" id="set-node">Check Node runtime</button>
+        <button class="btn" id="set-python" data-icon="cpu" data-icon-size="14">${state.pythonReady ? 'Python loaded' : 'Load Python now'}</button>
+        <button class="btn" id="set-node" data-icon="terminal" data-icon-size="14">Check Node runtime</button>
+      </div>`,
+    ) + settingsCard(
+      'Node sandbox — WebContainers',
+      'Runs a real Node.js and npm in the tab, so Vite, Next and Express projects build and serve exactly as they do on a laptop.',
+      `<label class="check"><input type="checkbox" id="set-webcontainer" ${state.settings.webcontainer ? 'checked' : ''}> prepare this device for WebContainers</label>
+      <div class="hint" id="wc-state">${escapeHtml(
+        webcontainerSupported()
+          ? 'This page is cross-origin isolated — the sandbox can boot.'
+          : webcontainerDiagnosis().reason + (webcontainerDiagnosis().hint ? ` ${webcontainerDiagnosis().hint}` : ''),
+      )}</div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn primary" id="set-wc-boot" data-icon="play" data-icon-size="14">Boot Node sandbox</button>
+        <button class="btn" id="set-wc-install" data-icon="package" data-icon-size="14">npm install</button>
+        <button class="btn" id="set-wc-dev" data-icon="bolt" data-icon-size="14">npm run dev</button>
       </div>
-    </section>
+      <pre class="wc-log" id="wc-log" aria-live="polite"></pre>
+      <div class="hint">Turning this on reloads the tab with two extra headers (COOP/COEP). While it is on, OAuth pop-ups open as tabs and some cross-origin images in a generated preview may need CORS — turn it off when you are done. Safari cannot boot WebContainers yet.</div>`,
+    ),
 
-    <section>
-      <h3>Packages &amp; npm</h3>
-      <p class="hint">Installs run in this tab and land in the project — and in a mounted folder. The built-in resolver is fast and dependency-light; the full engine does what <code>npm install</code> does on a laptop.</p>
-      <div class="field"><label>Install engine</label>
+    packages: settingsCard(
+      'npm',
+      'Installs run in this tab and land in the project — and in a mounted folder.',
+      `<div class="field"><label for="set-npm-engine">Install engine</label>
         <select id="set-npm-engine">
           <option value="builtin" ${(state.settings.npmEngine || 'builtin') === 'builtin' ? 'selected' : ''}>Built-in — fast resolver, registry only</option>
           <option value="nodepod" ${state.settings.npmEngine === 'nodepod' ? 'selected' : ''}>Full npm — Nodepod (semver ranges, transitive, dev + optional, workspaces)</option>
         </select>
         <div class="hint" id="npm-engine-state">checking the full engine…</div>
       </div>
-      <div class="field"><label>Registry</label>
+      <div class="field"><label for="set-npm-registry">Registry</label>
         <input type="url" id="set-npm-registry" placeholder="https://registry.npmjs.org" value="${escapeHtml(state.settings.npmRegistry || '')}" spellcheck="false">
-        <div class="hint">Leave blank for the public registry. A mirror or a private registry&#39;s read URL works too.</div>
+        <div class="hint">Leave blank for the public registry. A mirror or a private registry&rsquo;s read URL works too.</div>
       </div>
       <div class="row">
-        <button class="btn" id="set-npm-install">${icon('package', 14)} npm install</button>
-        <button class="btn" id="set-npm-list">${icon('boxes', 14)} Installed packages</button>
+        <button class="btn" id="set-npm-install" data-icon="package" data-icon-size="14">npm install</button>
+        <button class="btn" id="set-npm-list" data-icon="boxes" data-icon-size="14">Installed packages</button>
       </div>
-      <div class="hint">Missing the full engine? Run <code>npm run vendor:nodepod</code> and rebuild — it is not committed because it is 5 MB of someone else's code.</div>
-    </section>
+      <div class="hint">Missing the full engine? Run <code>npm run vendor:nodepod</code> and rebuild — it is not committed because it is 5 MB of someone else&rsquo;s code.</div>`,
+    ),
 
-    <section>
-      <h3>MCP servers</h3>
-      <p class="hint">Connect remote MCP servers (Gemini, Claude, GitHub, Linear…). Their tools appear to the agent as <code>mcp__server__tool</code>. Requests go straight from this browser to the server.</p>
-      <div id="mcp-list">${(state.settings.mcp || [])
-        .map((server, index) => `<div class="field mcp-row">
+    mcp: settingsCard(
+      'Remote MCP servers',
+      'Connect Gemini, Claude, GitHub, Linear… Their tools appear to the agent as <code>mcp__server__tool</code>. Requests go straight from this browser to the server.',
+      `<div id="mcp-list">${(state.settings.mcp || [])
+        .map(
+          (server, index) => `<div class="field mcp-row">
           <div class="row">
             <input type="text" data-mcp-name="${index}" placeholder="name" value="${escapeHtml(server.name || '')}">
             <input type="text" data-mcp-url="${index}" placeholder="https://server.example.com/mcp" value="${escapeHtml(server.url || '')}">
-            <button class="icon-btn sm" data-mcp-remove="${index}" data-icon="trash" title="Remove"></button>
+            <button class="icon-btn sm" data-mcp-remove="${index}" data-icon="trash" title="Remove" aria-label="Remove server"></button>
           </div>
           <div class="row">
             <input type="password" data-mcp-token="${index}" placeholder="Bearer token (optional)" value="${server.token ? '••••••' : ''}" autocomplete="off">
             <label class="check"><input type="checkbox" data-mcp-relay="${index}" ${server.useRelay ? 'checked' : ''}> route through relay (CORS)</label>
           </div>
-        </div>`)
+        </div>`,
+        )
         .join('')}</div>
       <div class="row">
         <button class="btn" id="set-mcp-add" data-icon="plus">Add server</button>
         <button class="btn primary" id="set-mcp-connect" data-icon="link">Connect all</button>
       </div>
-      <div class="hint" id="mcp-state">${state.mcp.clients.length ? `connected: ${state.mcp.clients.map((c) => c.name).join(', ')}` : 'none connected'}</div>
-    </section>
+      <div class="hint" id="mcp-state">${state.mcp.clients.length ? `connected: ${state.mcp.clients.map((c) => c.name).join(', ')}` : 'none connected'}</div>`,
+    ),
 
-    <section>
-      <h3>Hooks</h3>
-      <p class="hint">Project hooks live in <code>.alphacode/hooks.js</code>. A hook can block a tool, rewrite its arguments, or add a note for the model — the browser equivalent of Claude Code's hooks.</p>
-      <textarea id="set-hooks" class="editor" style="min-height:120px" spellcheck="false" placeholder="export default { pre_tool: [{ match: 'bash', run: () => ({ block: 'no shell' }) }] }">${escapeHtml(state.settings.hooks || '')}</textarea>
-      <div class="row" style="margin-top:8px"><button class="btn" id="set-hooks-save">Save hooks</button><span class="hint">Saved in this browser and reapplied on the next turn.</span></div>
-    </section>
+    hooks: settingsCard(
+      'Project hooks',
+      'Hooks live in <code>.alphacode/hooks.js</code>. A hook can block a tool, rewrite its arguments, or add a note for the model — the browser equivalent of Claude Code&rsquo;s hooks.',
+      `<textarea id="set-hooks" class="editor" spellcheck="false" placeholder="export default { pre_tool: [{ match: 'bash', run: () => ({ block: 'no shell' }) }] }">${escapeHtml(state.settings.hooks || '')}</textarea>
+      <div class="row" style="margin-top:8px"><button class="btn" id="set-hooks-save" data-icon="save" data-icon-size="14">Save hooks</button><span class="hint">Saved in this browser and reapplied on the next turn.</span></div>`,
+    ),
 
-    <section>
-      <h3>Your data</h3>
-      <p class="hint">Projects, files and keys live in this browser. Export before clearing site data.</p>
-      <div class="row">
-        <button class="btn" id="set-export">Export all projects</button>
-        <button class="btn danger" id="set-wipe">Delete everything</button>
-      </div>
-    </section>`;
-
-  const engineSelect = $('#set-npm-engine');
-  if (engineSelect) {
-    engineSelect.onchange = async () => {
-      state.settings.npmEngine = engineSelect.value;
-      await state.store.saveSettings({ npmEngine: engineSelect.value });
-      if (state.node) state.node.npmEngine = engineSelect.value;
-      toast(engineSelect.value === 'nodepod' ? 'npm will use the full engine' : 'npm will use the built-in resolver', 'info', 3200);
-      refreshNpmEngineState();
-    };
-    refreshNpmEngineState();
-  }
-  const registryInput = $('#set-npm-registry');
-  if (registryInput) {
-    registryInput.onchange = async () => {
-      const value = registryInput.value.trim().replace(/\/+$/, '');
-      state.settings.npmRegistry = value;
-      await state.store.saveSettings({ npmRegistry: value });
-      if (state.node) state.node.npmRegistry = value;
-      toast(value ? `npm will use ${value}` : 'npm will use the public registry', 'info', 3400);
-    };
-  }
-  $('#set-npm-install')?.addEventListener('click', () => {
-    $('#modal').hidden = true;
-    runNpmInstall();
-  });
-  $('#set-npm-list')?.addEventListener('click', () => {
-    $('#modal').hidden = true;
-    runShellLine('npm ls');
-  });
-
-  $('#set-export').onclick = exportAll;
-  $('#set-wipe').onclick = async () => {
-    if (!confirm('Delete every project, file and key in this browser?')) return;
-    indexedDB.deleteDatabase('alphacode');
-    if (navigator.storage?.getDirectory) {
-      const root = await navigator.storage.getDirectory();
-      await root.removeEntry('projects', { recursive: true }).catch(() => {});
-    }
-    location.reload();
+    data: settingsCard(
+      'Your data',
+      'Projects, files and keys live in this browser. Export before clearing site data.',
+      `<div class="row">
+        <button class="btn" id="set-export" data-icon="download" data-icon-size="14">Export all projects</button>
+        <button class="btn danger" id="set-wipe" data-icon="trash" data-icon-size="14">Delete everything</button>
+      </div>`,
+    ),
   };
+
+  body.innerHTML = `
+    <div class="set-shell">
+      <nav class="set-nav" role="tablist" aria-label="Settings sections">
+        ${SETTINGS_TABS.map(
+          (tab, index) => `<button class="set-tab ${index === 0 ? 'is-active' : ''}" role="tab" data-tab="${tab.id}" aria-selected="${index === 0}" aria-controls="pane-${tab.id}">
+            ${icon(tab.icon, 15)}<span>${tab.label}</span>
+          </button>`,
+        ).join('')}
+      </nav>
+      <div class="set-panes">
+        ${SETTINGS_TABS.map(
+          (tab, index) => `<div class="set-pane ${index === 0 ? 'is-active' : ''}" id="pane-${tab.id}" data-pane="${tab.id}" role="tabpanel">${panes[tab.id] || ''}</div>`,
+        ).join('')}
+      </div>
+    </div>`;
+
+  const selectTab = (id) => {
+    body.querySelectorAll('.set-tab').forEach((tab) => {
+      const active = tab.dataset.tab === id;
+      tab.classList.toggle('is-active', active);
+      tab.setAttribute('aria-selected', String(active));
+    });
+    body.querySelectorAll('.set-pane').forEach((pane) => pane.classList.toggle('is-active', pane.dataset.pane === id));
+    body.querySelector('.set-panes')?.scrollTo?.({ top: 0 });
+  };
+  body.querySelectorAll('.set-tab').forEach((tab) => {
+    tab.onclick = () => selectTab(tab.dataset.tab);
+  });
+
+  renderDefaultModelSelect();
+  renderModelPicker();
+
   $('#modal').hidden = false;
   paintIcons(body);
+
+  /* ---------------------------------------------------------- appearance -- */
 
   body.querySelectorAll('[data-theme-set]').forEach((button) => {
     button.onclick = () => {
@@ -2187,76 +2454,28 @@ function openSettings() {
       body.querySelectorAll('[data-layout-set]').forEach((other) => other.classList.toggle('primary', other === button));
     };
   });
-  $('#set-cc').onchange = async (e) => {
-    state.settings = await state.store.saveSettings({ cCompilerEndpoint: e.target.value.trim() });
-  };
-  $('#set-python').onclick = async (e) => {
-    e.target.disabled = true;
-    e.target.textContent = 'loading…';
+
+  /* -------------------------------------------------------------- models -- */
+
+  $('#set-fetch-models')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    const status = $('#model-fetch-status');
+    button.disabled = true;
     try {
-      await ensurePython();
-      state.pythonReady = true;
-      e.target.textContent = 'Python loaded';
-      toast('CPython is ready in this tab', 'ok');
+      await fetchModelCatalog({ onStatus: (text) => status && (status.textContent = text) });
+      toast('Model list refreshed', 'ok', 2600);
     } catch (err) {
-      e.target.textContent = 'Load Python now';
-      e.target.disabled = false;
-      toast(err.message, 'err');
+      if (status) status.textContent = `could not fetch models: ${err.message}`;
+    } finally {
+      button.disabled = false;
     }
-  };
-  $('#set-node').onclick = async () => {
-    const files = await state.fs.snapshot(state.project.id).catch(() => ({}));
-    const sample = Object.keys(files).find((f) => f.endsWith('.js'));
-    toast(`Node runtime ready${sample ? ` — try: node ${sample}` : ''}`, 'ok');
-  };
-  $('#set-mcp-add').onclick = async () => {
-    const list = [...(state.settings.mcp || []), { name: '', url: '', headers: {} }];
-    state.settings = await state.store.saveSettings({ mcp: list });
-    openSettings();
-  };
-  $('#set-mcp-connect').onclick = async () => {
-    const list = (state.settings.mcp || []).map((server) => ({ ...server }));
-    if (!list.length) return toast('Add a server first', 'warn');
-    const status = $('#mcp-state');
-    status.textContent = 'connecting…';
-    await loadMcp();
-    status.textContent = state.mcp.clients.length
-      ? `connected: ${state.mcp.clients.map((c) => `${c.name} (${state.mcp.tools.filter((t) => t.name.startsWith(`mcp__${c.name}__`)).length} tools)`).join(', ')}`
-      : `none connected — ${state.mcp.errors[0]?.error || 'check the URL'}`;
-  };
-  body.querySelectorAll('[data-mcp-remove]').forEach((button) => {
-    button.onclick = async () => {
-      const list = [...(state.settings.mcp || [])];
-      list.splice(Number(button.dataset.mcpRemove), 1);
-      state.settings = await state.store.saveSettings({ mcp: list });
-      openSettings();
-    };
   });
-  body.querySelectorAll('[data-mcp-name],[data-mcp-url],[data-mcp-token],[data-mcp-relay]').forEach((input) => {
-    input.onchange = async () => {
-      const list = [...(state.settings.mcp || [])];
-      const index = Number(input.dataset.mcpName ?? input.dataset.mcpUrl ?? input.dataset.mcpToken ?? input.dataset.mcpRelay);
-      const server = { name: '', url: '', headers: {}, ...list[index] };
-      if (input.dataset.mcpName !== undefined) server.name = input.value.trim();
-      if (input.dataset.mcpUrl !== undefined) server.url = input.value.trim();
-      if (input.dataset.mcpToken !== undefined && !input.value.startsWith('••')) {
-        server.token = input.value.trim();
-        server.headers = { ...(server.headers || {}), ...(server.token ? { Authorization: `Bearer ${server.token}` } : {}) };
-      }
-      if (input.dataset.mcpRelay !== undefined) server.useRelay = input.checked;
-      list[index] = server;
-      state.settings = await state.store.saveSettings({ mcp: list });
-    };
-  });
-  $('#set-hooks-save').onclick = async () => {
-    state.settings = await state.store.saveSettings({ hooks: $('#set-hooks').value });
-    state.hooks = await loadHooks({ fs: state.fs, projectId: state.project.id, settings: state.settings }).catch(() => null);
-    toast('Hooks saved', 'ok');
-  };
+
   $('#set-model').onchange = async (e) => {
     state.model = e.target.value;
     state.settings = await state.store.saveSettings({ model: state.model });
     renderChrome();
+    toast(`Default model: ${state.model}`, 'ok', 2400);
   };
   $('#set-mode').onchange = async (e) => {
     state.mode = e.target.value;
@@ -2289,6 +2508,9 @@ function openSettings() {
       toast(continueToggle.checked ? 'Long tasks will keep going' : 'A turn will stop at its first budget', 'info', 2600);
     };
   }
+
+  /* ----------------------------------------------------------- providers -- */
+
   let saveTimer;
   body.querySelectorAll('[data-key],[data-model]').forEach((input) => {
     input.oninput = () => {
@@ -2306,6 +2528,219 @@ function openSettings() {
       }, 350);
     };
   });
+
+  /* ------------------------------------------------------------ runtimes -- */
+
+  $('#set-cc').onchange = async (e) => {
+    state.settings = await state.store.saveSettings({ cCompilerEndpoint: e.target.value.trim() });
+    const stateNode = $('#compiler-state');
+    if (stateNode) stateNode.textContent = toolchainStatus(state.settings).detail;
+  };
+  const wasmToggle = $('#set-wasm');
+  if (wasmToggle) {
+    wasmToggle.onchange = async () => {
+      state.settings = await state.store.saveSettings({ wasmCompilers: wasmToggle.checked });
+      const stateNode = $('#compiler-state');
+      if (stateNode) stateNode.textContent = toolchainStatus(state.settings).detail;
+      toast(wasmToggle.checked ? 'C, C++ and Rust can compile in this tab' : 'In-browser compilers off', 'info', 2800);
+    };
+  }
+  $('#set-python').onclick = async (e) => {
+    e.target.disabled = true;
+    e.target.textContent = 'loading…';
+    try {
+      await ensurePython();
+      state.pythonReady = true;
+      e.target.textContent = 'Python loaded';
+      toast('CPython is ready in this tab', 'ok');
+    } catch (err) {
+      e.target.textContent = 'Load Python now';
+      e.target.disabled = false;
+      toast(err.message, 'err');
+    }
+  };
+  $('#set-node').onclick = async () => {
+    const files = await state.fs.snapshot(state.project.id).catch(() => ({}));
+    const sample = Object.keys(files).find((f) => f.endsWith('.js'));
+    toast(`Node runtime ready${sample ? ` — try: node ${sample}` : ''}`, 'ok');
+  };
+
+  /* -------------------------------------------------------- node sandbox -- */
+
+  const wcToggle = $('#set-webcontainer');
+  if (wcToggle) {
+    wcToggle.onchange = async () => {
+      const on = wcToggle.checked;
+      state.settings = await state.store.saveSettings({ webcontainer: on });
+      // Isolation is decided by response headers, so the tab has to reload for
+      // the switch to mean anything. That is also the honest UX: the user sees
+      // exactly when the headers change.
+      document.cookie = on ? 'nex_wc=1; path=/; max-age=31536000; samesite=lax' : 'nex_wc=; path=/; max-age=0; samesite=lax';
+      toast(on ? 'Reloading with the Node sandbox enabled…' : 'Reloading without the Node sandbox…', 'info', 2400);
+      setTimeout(() => location.reload(), 800);
+    };
+  }
+  const wcLog = (text) => {
+    const node = $('#wc-log');
+    if (!node) return;
+    node.textContent += text;
+    if (node.textContent.length > 20_000) node.textContent = node.textContent.slice(-16_000);
+    node.scrollTop = node.scrollHeight;
+  };
+  const wcStatus = (text) => {
+    const node = $('#wc-state');
+    if (node) node.textContent = text;
+  };
+  const wcBoot = async () => {
+    if (state.wc?.instance) return state.wc.instance;
+    const files = await state.fs.snapshot(state.project.id).catch(() => ({}));
+    wcStatus('booting the container…');
+    const instance = await bootWebContainer({
+      files,
+      onOutput: wcLog,
+      onServerReady: (url) => {
+        wcStatus(`dev server live at ${url}`);
+        showContainerPreview(url);
+      },
+      onFileWritten: (filePath, contents) => state.fs.write(state.project.id, filePath, contents).catch(() => {}),
+    });
+    state.wc = { instance };
+    wcStatus('container ready — run npm install');
+    return instance;
+  };
+  $('#set-wc-boot')?.addEventListener('click', async () => {
+    try {
+      await wcBoot();
+      toast('WebContainer is running real Node in this tab', 'ok', 3200);
+    } catch (err) {
+      wcStatus(`${err.message}${err.hint ? ` ${err.hint}` : ''}`);
+      toast(err.message, 'err', 5000);
+    }
+  });
+  $('#set-wc-install')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const instance = await wcBoot();
+      const { exitCode } = await installInContainer(instance, { onOutput: wcLog });
+      wcStatus(exitCode === 0 ? 'dependencies installed inside the container' : `npm install exited ${exitCode} — see the log`);
+    } catch (err) {
+      wcStatus(`${err.message}${err.hint ? ` ${err.hint}` : ''}`);
+    } finally {
+      button.disabled = false;
+    }
+  });
+  $('#set-wc-dev')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const instance = await wcBoot();
+      wcStatus('starting the dev server…');
+      const { url } = await startDevInContainer(instance, { onOutput: wcLog });
+      wcStatus(url ? `dev server live at ${url}` : 'no server reported a URL — see the log');
+    } catch (err) {
+      wcStatus(`${err.message}${err.hint ? ` ${err.hint}` : ''}`);
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  /* ------------------------------------------------------------ packages -- */
+
+  const engineSelect = $('#set-npm-engine');
+  if (engineSelect) {
+    engineSelect.onchange = async () => {
+      state.settings.npmEngine = engineSelect.value;
+      await state.store.saveSettings({ npmEngine: engineSelect.value });
+      if (state.node) state.node.npmEngine = engineSelect.value;
+      toast(engineSelect.value === 'nodepod' ? 'npm will use the full engine' : 'npm will use the built-in resolver', 'info', 3200);
+      refreshNpmEngineState();
+    };
+    refreshNpmEngineState();
+  }
+  const registryInput = $('#set-npm-registry');
+  if (registryInput) {
+    registryInput.onchange = async () => {
+      const value = registryInput.value.trim().replace(/\/+$/, '');
+      state.settings.npmRegistry = value;
+      await state.store.saveSettings({ npmRegistry: value });
+      if (state.node) state.node.npmRegistry = value;
+      toast(value ? `npm will use ${value}` : 'npm will use the public registry', 'info', 3400);
+    };
+  }
+  $('#set-npm-install')?.addEventListener('click', () => {
+    $('#modal').hidden = true;
+    runNpmInstall();
+  });
+  $('#set-npm-list')?.addEventListener('click', () => {
+    $('#modal').hidden = true;
+    runShellLine('npm ls');
+  });
+
+  /* ----------------------------------------------------------------- mcp -- */
+
+  $('#set-mcp-add').onclick = async () => {
+    const list = [...(state.settings.mcp || []), { name: '', url: '', headers: {} }];
+    state.settings = await state.store.saveSettings({ mcp: list });
+    openSettings();
+    selectTab('mcp');
+  };
+  $('#set-mcp-connect').onclick = async () => {
+    const list = (state.settings.mcp || []).map((server) => ({ ...server }));
+    if (!list.length) return toast('Add a server first', 'warn');
+    const status = $('#mcp-state');
+    status.textContent = 'connecting…';
+    await loadMcp();
+    status.textContent = state.mcp.clients.length
+      ? `connected: ${state.mcp.clients.map((c) => `${c.name} (${state.mcp.tools.filter((t) => t.name.startsWith(`mcp__${c.name}__`)).length} tools)`).join(', ')}`
+      : `none connected — ${state.mcp.errors[0]?.error || 'check the URL'}`;
+  };
+  body.querySelectorAll('[data-mcp-remove]').forEach((button) => {
+    button.onclick = async () => {
+      const list = [...(state.settings.mcp || [])];
+      list.splice(Number(button.dataset.mcpRemove), 1);
+      state.settings = await state.store.saveSettings({ mcp: list });
+      openSettings();
+      selectTab('mcp');
+    };
+  });
+  body.querySelectorAll('[data-mcp-name],[data-mcp-url],[data-mcp-token],[data-mcp-relay]').forEach((input) => {
+    input.onchange = async () => {
+      const list = [...(state.settings.mcp || [])];
+      const index = Number(input.dataset.mcpName ?? input.dataset.mcpUrl ?? input.dataset.mcpToken ?? input.dataset.mcpRelay);
+      const server = { name: '', url: '', headers: {}, ...list[index] };
+      if (input.dataset.mcpName !== undefined) server.name = input.value.trim();
+      if (input.dataset.mcpUrl !== undefined) server.url = input.value.trim();
+      if (input.dataset.mcpToken !== undefined && !input.value.startsWith('••')) {
+        server.token = input.value.trim();
+        server.headers = { ...(server.headers || {}), ...(server.token ? { Authorization: `Bearer ${server.token}` } : {}) };
+      }
+      if (input.dataset.mcpRelay !== undefined) server.useRelay = input.checked;
+      list[index] = server;
+      state.settings = await state.store.saveSettings({ mcp: list });
+    };
+  });
+
+  /* --------------------------------------------------------------- hooks -- */
+
+  $('#set-hooks-save').onclick = async () => {
+    state.settings = await state.store.saveSettings({ hooks: $('#set-hooks').value });
+    state.hooks = await loadHooks({ fs: state.fs, projectId: state.project.id, settings: state.settings }).catch(() => null);
+    toast('Hooks saved', 'ok');
+  };
+
+  /* ---------------------------------------------------------------- data -- */
+
+  $('#set-export').onclick = exportAll;
+  $('#set-wipe').onclick = async () => {
+    if (!confirm('Delete every project, file and key in this browser?')) return;
+    indexedDB.deleteDatabase('alphacode');
+    if (navigator.storage?.getDirectory) {
+      const root = await navigator.storage.getDirectory();
+      await root.removeEntry('projects', { recursive: true }).catch(() => {});
+    }
+    location.reload();
+  };
 }
 
 async function exportAll() {

@@ -220,8 +220,10 @@ async function main() {
   Referrer-Policy: no-referrer
   Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=()
   X-Frame-Options: SAMEORIGIN
-  Cross-Origin-Opener-Policy: same-origin-allow-popups
   Strict-Transport-Security: max-age=31536000; includeSubDomains
+# Cross-Origin-Opener-Policy is set by functions/_middleware.js, not here: it
+# depends on whether this visitor turned on the WebContainers sandbox, and a
+# static header would be sent alongside it and win.
 
 /assets/*
   Cache-Control: public, max-age=31536000, immutable

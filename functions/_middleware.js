@@ -24,6 +24,14 @@ const CSP = [
   "frame-ancestors 'self'",
 ].join('; ');
 
+/** The cookie the Settings switch sets before reloading the tab. */
+const WC_COOKIE = 'nex_wc';
+
+const hasCookie = (request, name) =>
+  String(request.headers.get('Cookie') || '')
+    .split(';')
+    .some((pair) => pair.trim().startsWith(`${name}=`));
+
 export async function onRequest(context) {
   const res = await context.next();
   const out = new Response(res.body, res);
@@ -32,7 +40,14 @@ export async function onRequest(context) {
   out.headers.set('Referrer-Policy', 'no-referrer');
   out.headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=()');
   out.headers.set('X-Frame-Options', 'SAMEORIGIN');
-  out.headers.set('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
+  // WebContainers (Settings → Runtimes → Node sandbox) needs a cross-origin
+  // isolated page: COOP same-origin + COEP. That combination also severs OAuth
+  // popups and tightens subresource loading, so it is opt-in per visitor rather
+  // than global — the switch writes this cookie and reloads.
+  const isolated = hasCookie(context.request, WC_COOKIE);
+  out.headers.set('Cross-Origin-Opener-Policy', isolated ? 'same-origin' : 'same-origin-allow-popups');
+  if (isolated) out.headers.set('Cross-Origin-Embedder-Policy', 'credentialless');
+  out.headers.set('Vary', 'Cookie');
   out.headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   if (context.request.url.includes('/api/oauth/')) {
     out.headers.set('Cache-Control', 'no-store');

@@ -11,10 +11,11 @@ The browser edition gives up the things a tab genuinely cannot do (stdio
 subprocesses, `npm install`, PTY programs, server-side hooks) and keeps
 everything the agent loop needs. The table below is the browser edition.
 
-Weighted result: **91 %**, verified by `npm test` — 202 tests, of which 55 drive
+Weighted result: **91 %**, verified by `npm test` — 260+ tests, of which 51 drive
 request behaviour and edit precision (`tests/efficiency.test.mjs`), 33 drive the
-engine, 17 drive the runtimes (Node, npm, hooks, jobs, MCP, WASI) and 12 boot the
-built bundle in jsdom.
+engine, 24 drive the runtimes (Node, npm, hooks, jobs, MCP, WASI, the in-tab
+compilers, WebContainers), 11 cover the same-origin LLM relay, 18 cover model
+discovery and boot the built bundle in jsdom.
 
 Request efficiency (v8) is scored under *Agentic loop*: a per-provider governor,
 `Retry-After` handling, sticky providers, a per-turn request budget and batching
@@ -52,8 +53,11 @@ Not part of the Claude Code comparison, but part of the product:
 * **Deploy to *your* account, without tokens.** GitHub OAuth (popup, origin-
   checked) pushes the project to the user's repo; the provider's own import page
   then builds it in the user's account.
-* **Free routing with no key**, plus BYOK for nine providers or any
-  OpenAI-compatible endpoint.
+* **Free routing with no key** (Kilo Auto first, OpenCode Zen next), plus BYOK
+  for nine providers or any OpenAI-compatible endpoint.
+* **Fetch models** — every provider's live catalog is merged with a curated
+  fallback, ranked for coding, and the models you tick become the fallback chain
+  the harness walks *inside* one request.
 
 ## Where the runtimes come from (and why)
 
@@ -82,11 +86,13 @@ shell, the tools or the UI.
 | Limit | Consequence | Workaround in the app |
 |---|---|---|
 | No OS processes | No native addons (`sharp`, `bcrypt`), no PTY, no arbitrary binaries | Real npm for pure-JS packages; WASI for compiled code; jobs in Web Workers |
-| No C/C++ toolchain by default | `cc` needs a ~60 MB clang bundle | Compile elsewhere to `wasm32-wasi` and run it here, or point at your own compile endpoint |
+| Native toolchains are a download | `cc`/`rustc` need a WASIX image (~30 MB, cached) | Switch in Settings → Runtimes, or a compile endpoint; `wasm main.wasm` runs any WASI module with nothing to download |
+| Threads need cross-origin isolation | WebContainers cannot boot without COOP/COEP | Opt-in switch sets the headers for that visitor and reloads; the built-in Node runtime needs no headers at all |
+| Some networks block the free routers | Kilo refuses cross-origin calls on a few devices | Same-origin relay at `/api/llm/<router>` for credential-free requests only; model-level cooldowns rather than provider blacklists |
 | No long-running work after close | Closing the tab stops everything | Background jobs survive navigation inside the session; export to ZIP; deploy hands the build to your host |
 | Browser quota | 8 MB per file, origin-wide quota | Export before clearing site data |
 | Blocked storage in some frames | Files vanish on reload | Filesystem probes OPFS → IndexedDB → memory and *tells the user* which one is live |
-| CORS on provider APIs | Some providers refuse browser calls | BYOK providers that allow CORS; the proxy functions are deliberately not shipped |
+| CORS on provider APIs | Some BYOK providers refuse browser calls | BYOK providers that allow CORS; the only relay shipped is keyless (`/api/llm`), and it rejects any request carrying a key |
 
 ## Deliberate differences (not counted as gaps)
 

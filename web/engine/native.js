@@ -20,6 +20,8 @@
  * fake one would be worse than none.
  */
 
+import { compileNative } from './wasm-toolchains.js';
+
 /* ------------------------------------------------------------- WASI shim -- */
 
 const WASI_ERRNO = { SUCCESS: 0, BADF: 8, EXIST: 20, INVAL: 28, NOENT: 44, NOSYS: 52, NOTDIR: 54 };
@@ -252,40 +254,25 @@ export class CompilerUnavailable extends Error {
 }
 
 /**
- * Compile C/C++ to a WASI module.
+ * Compile C, C++ or Rust to a WASI module.
  *
- * Backends, in order:
- *  1. `settings.cCompilerUrl`  — a wasm-clang bundle (hosted by you, or by the
- *     community build), loaded in a worker;
- *  2. `settings.cCompilerEndpoint` — a compile service you run (POST source,
- *     receive .wasm). This is what CI-less teams use, and it keeps the tab light.
+ * Backends live in `wasm-toolchains.js`: the compile endpoint first (any
+ * language, instant), then the in-browser WASIX toolchains when the user has
+ * switched them on in Settings → Runtimes.
  *
  * @returns {Promise<Uint8Array>} the compiled module
  */
 export async function compileC({ source, language = 'c', filename, files = {}, settings = {}, onOutput = () => {} }) {
-  if (settings?.cCompilerEndpoint) {
-    onOutput(`compiling ${filename || language} on ${settings.cCompilerEndpoint}…\n`);
-    const res = await fetch(settings.cCompilerEndpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ language, source, filename, files, target: 'wasm32-wasi' }),
-    });
-    if (!res.ok) throw new Error(`compiler endpoint returned ${res.status}`);
-    const buffer = new Uint8Array(await res.arrayBuffer());
-    if (buffer.length < 4 || buffer[0] !== 0x00 || buffer[1] !== 0x61) throw new Error('compiler endpoint did not return a wasm module');
-    return buffer;
+  try {
+    const { wasm } = await compileNative({ source, language, filename, settings, onOutput });
+    return wasm;
+  } catch (err) {
+    throw new CompilerUnavailable(err.message, err.hint || '');
   }
-  throw new CompilerUnavailable(
-    'C/C++ compilation needs a WASM toolchain (clang + lld + sysroot, ~60 MB).',
-    'Set one of these in Settings → Runtime:\n' +
-      '  • “C compiler endpoint” — a URL you run that turns source into wasm32-wasi (smallest, instant),\n' +
-      '  • or enable the experimental built-in wasm-clang bundle.\n' +
-      'Already have a .wasm? `run main.wasm` executes any WASI binary right now.',
-  );
 }
 
-/** True when something can compile C today. */
-export const canCompileC = (settings = {}) => Boolean(settings?.cCompilerEndpoint);
+/** True when something can compile C/C++/Rust today. */
+export const canCompileC = (settings = {}) => Boolean(settings?.cCompilerEndpoint) || settings?.wasmCompilers === true;
 
 export const RUNTIME_MATRIX = {
   python: { real: true, how: 'CPython 3.12 → WASM (Pyodide), with micropip', notes: 'numpy, pandas, matplotlib, sqlite3 included' },
@@ -293,7 +280,7 @@ export const RUNTIME_MATRIX = {
   npm: { real: true, how: 'edge resolver + KV-cached plans + tarballs in the tab', notes: 'no postinstall scripts by design' },
   shell: { real: true, how: 'implemented over the project filesystem', notes: 'pipes, redirects, globs, background jobs' },
   wasi: { real: true, how: 'WASI preview-1 shim over WebAssembly', notes: 'runs any .wasm built for wasm32-wasi' },
-  c: { real: false, how: 'wasm-clang bundle or your compile endpoint', notes: 'needs a ~60 MB toolchain, loaded on demand' },
-  cpp: { real: false, how: 'same as C', notes: 'same toolchain' },
-  rust: { real: false, how: 'not supported', notes: 'no production rustc→wasm exists; wasm output still runs via WASI' },
+  c: { real: true, how: 'clang → wasm32-wasi, in the tab (Wasmer WASIX)', notes: 'switch it on in Settings → Runtimes; first compile downloads ~30 MB' },
+  cpp: { real: true, how: 'clang++ → wasm32-wasi, in the tab', notes: 'C++20, same toolchain as C' },
+  rust: { real: false, how: 'rustc → wasm32-wasip1, in the tab when the image loads', notes: 'experimental: a compile endpoint is the reliable Rust route' },
 };

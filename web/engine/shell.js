@@ -532,11 +532,21 @@ export class Shell {
       }
       case 'cc':
       case 'gcc':
-      case 'clang': {
-        if (!this.compileNative) return this.fail('cc: no C toolchain configured (Settings → Runtime)');
+      case 'g++':
+      case 'clang':
+      case 'clang++': {
+        if (!this.compileNative) return this.fail('cc: no compiler configured (Settings → Runtimes)');
         const file = args.find((a) => !a.startsWith('-'));
         if (!file) return this.fail('cc: usage: cc <file.c> [-o out.wasm]');
-        const res = await this.compileNative(this.abs(file), file.endsWith('.cpp') || file.endsWith('.cc') ? 'cpp' : 'c');
+        const language = /\.(cpp|cc|cxx|c\+\+)$/.test(file) || cmd === 'g++' || cmd === 'clang++' ? 'cpp' : 'c';
+        const res = await this.compileNative(this.abs(file), language);
+        return { code: res.code, output: res.output };
+      }
+      case 'rustc': {
+        if (!this.compileNative) return this.fail('rustc: no compiler configured (Settings → Runtimes)');
+        const file = args.find((a) => !a.startsWith('-'));
+        if (!file) return this.fail('rustc: usage: rustc <file.rs>');
+        const res = await this.compileNative(this.abs(file), 'rust');
         return { code: res.code, output: res.output };
       }
       case 'jobs': {

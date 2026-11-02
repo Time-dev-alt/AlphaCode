@@ -126,7 +126,9 @@ needed twelve requests never finished. v8 makes the request pattern deliberate:
 | **Budget the turn** | 8 requests by default (configurable 4–16). The agent is told how many are left and stops cleanly, with a **Continue** button instead of a failed turn | `Harness.send` |
 | **Batch in the prompt** | The system prompt requires independent tool calls in *one* response, complete files in one `write`, no re-reads, no per-step verification | `web/engine/agent/prompt.js` |
 | **Plural tools** | `write_many` writes every file a task needs in one call (`read_many` does the same for reads), so a multi-file change is one round trip, not one per file | `web/engine/tools.js` |
-| **Instant scaffolds** | `scaffold` writes a complete, working landing page / dashboard / todo app / docs site — 300+ lines, zero output tokens, zero requests. The template gallery uses it too: picking a template now produces a finished app before the model is involved | `web/engine/agent/scaffolds.js` |
+| **Instant scaffolds** | `scaffold` writes a complete, working landing page / dashboard / todo app / docs site — 300+ lines, with no model request at all. The template gallery uses it too: picking a template produces a finished app before the model is involved | `web/engine/agent/scaffolds.js` |
+| **Walk models, not providers** | A free router that refuses one model walks the next candidate inside the *same* request, so a retired model costs one attempt instead of a provider failover. Tick the models you trust in Settings → Models | `harness.js` + `agent/catalog.js` |
+| **Retry through the same origin** | When a keyless router is blocked by the network (403/405, stripped `Origin`, a filtering proxy) the call is retried through `/api/llm/<router>`, which never sees a user key | `providers.js` + `functions/api/llm` |
 | **Keep going while it is working** | A productive turn borrows another segment of requests (3 segments max, still gated by the sliding window) instead of stopping at the first checkpoint | `Harness.send` + `governor.extend()` |
 | **Run tools in parallel** | A batch of read-only calls goes out together; identical calls in one message are answered once | `Harness.executeToolCalls` |
 | **Rank the file list** | Files are ranked by the words in the request, recency and entry-point status instead of listing the first eighty | `prompt.rankFiles` |
@@ -162,7 +164,9 @@ Genspark — read [`docs/LOVABLE-GENSPARK.md`](docs/LOVABLE-GENSPARK.md).
 | Hooks | `.alphacode/hooks.js` — block a tool, rewrite its arguments, or add a note for the model |
 | Preview | Self-contained HTML preview, instant, no account and no deploy |
 | Deploys | Push to *your* GitHub with one OAuth click, then import into your own Cloudflare / Vercel / Netlify account |
-| Models | Keyless free routing (Kilo, OpenCode Zen), plus BYOK for OpenAI, Anthropic, Google, Groq, DeepSeek, Mistral, xAI, Together, OpenRouter, or any OpenAI-compatible endpoint |
+| Models | Keyless free routing (Kilo, OpenCode Zen) as the default, plus BYOK for OpenAI, Anthropic, Google, Groq, DeepSeek, Mistral, xAI, Together, OpenRouter, or any OpenAI-compatible endpoint. **Fetch models** asks each provider what it serves right now and lets you tick the fallback chain |
+| Native code | C, C++ and Rust compile to WebAssembly in the tab (`cc`, `clang++`, `rustc`) once the switch in Settings → Runtimes is on, or through a compile endpoint; `wasm main.wasm` runs any WASI module |
+| Node sandbox | StackBlitz **WebContainers** runs a real Node and npm in the tab — the path for Vite/Next/Express projects that need the real thing |
 | Keys | Stored in the browser (IndexedDB + `localStorage`), never sent anywhere except to the provider you chose |
 
 ---
@@ -316,10 +320,33 @@ the test suite against handles shaped exactly like the real ones.
 | | Status |
 | --- | --- |
 | **Run** a `.wasm` built anywhere (`zig cc --target=wasm32-wasi`, `rustc --target wasm32-wasip1`, clang) | **Works today.** `wasm main.wasm` runs it with a real WASI shim: stdout/stderr, files, args, clocks, randomness. |
-| **Compile** C/C++ | Needs clang+lld+sysroot as a WASM bundle (~60 MB). Point **Settings → Runtime → C compiler endpoint** at a service you run, or compile elsewhere and run the output here. |
-| **Rust compiler** | Not supported. No production-grade `rustc`→WASM exists; Rust *binaries* still run through WASI. |
+| **Compile C / C++** | **In the tab** once *Settings → Runtimes → In-browser compilers (WASM)* is on: `cc main.c`, `clang++ main.cpp`. clang + lld + wasi-sysroot arrive as a WASIX image (~30 MB compressed, cached after the first compile). |
+| **Compile Rust** | `rustc main.rs` through the same switch — experimental, because it depends on a `rustc` WASIX image actually resolving. A **compile endpoint** is the reliable Rust path. |
+| **Compile anything, reliably** | Point **Settings → Runtimes → Compile endpoint** at a service you run; it turns source into `wasm32-wasi` for any language and keeps the tab light. |
 
-We would rather ship a real WASI runner plus a clear path than a fake "compiler".
+The switch is deliberately off by default: a 30 MB download is the user's
+decision, not ours. Nothing is faked — if no backend can compile, the shell says
+which switch or endpoint is missing instead of pretending a compiler exists.
+
+## Node sandbox (WebContainers)
+
+The built-in Node runtime is fast and needs no download, but it is our
+implementation. When a project genuinely needs `node` — a Vite dev server, a
+Next build, an Express API — turn on **Settings → Runtimes → Node sandbox**:
+
+1. The switch sets a `nex_wc=1` cookie and reloads; the Pages middleware then
+   answers with `Cross-Origin-Opener-Policy: same-origin` and
+   `Cross-Origin-Embedder-Policy: credentialless`, which is what makes
+   `crossOriginIsolated` true.
+2. **Boot Node sandbox** downloads `@webcontainer/api` (CDN, cached) and mounts
+   the project.
+3. **npm install** and **npm run dev** run inside the container; `server-ready`
+   points the preview iframe at the real dev-server URL, and files the container
+   writes are mirrored back into the project.
+
+Safari cannot boot WebContainers yet, and the UI says so instead of hanging.
+While the sandbox is on, OAuth pop-ups open as tabs — that is the COOP trade-off,
+and the switch turns it back off.
 
 ## Connect GitHub without pasting a token
 
@@ -380,9 +407,10 @@ Tests that matter for the client build:
 
 ```
 web/engine/        the product
-  node/            real Node: runtime, builtins, ESM→CJS, npm installer, session
+  node/            real Node: runtime, builtins, ESM→CJS, npm installer, session, WebContainers
   python.js        CPython on WASM, project mounted at /app
-  native.js        WASI runner + the C/C++ compiler hook
+  native.js        WASI runner + the compiler bridge
+  wasm-toolchains.js  in-tab C/C++/Rust → wasm (Wasmer WASIX) or a compile endpoint
   mcp.js           Streamable HTTP MCP client
   hooks.js         .alphacode/hooks.js
   jobs.js          background processes (Web Workers)
@@ -391,13 +419,15 @@ web/engine/        the product
   fs.js            OPFS → IndexedDB → memory, project-scoped paths, glob/grep
   shell.js         POSIX-ish shell: parser, pipes, redirects, builtins
   db.js            SQLite via sql.js/WASM, statement splitting, row editing
-  providers.js     model routing, streaming, retries, demo provider
+  providers.js     model routing, streaming, retries, relay fallback, demo provider
+  agent/catalog.js model discovery: /models, ranking, the user's model pool
   tools.js         tool registry, permission modes, unified diffs
   harness.js       the agent loop, compaction, checkpoints, subagents
   deploy.js        preview bundle, GitHub OAuth publish, provider import URLs
   zip.js           ZIP reader/writer for project export/import
 web/app/           UI (vanilla, no framework, ~0 dependencies at runtime)
-functions/         two Cloudflare Pages Functions: GitHub OAuth start/callback
+functions/         Pages Functions: GitHub OAuth start/callback, npm resolver,
+                   keyless LLM relay (/api/llm/<router>), optional MCP relay
 scripts/           build + dev server
 ```
 

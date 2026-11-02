@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -41,26 +42,82 @@ const MIME = {
   '.ico': 'image/x-icon',
 };
 
-const starts = new Map([
-  ['/api/oauth/github/start', 'functions/api/oauth/github/start.js'],
-  ['/api/oauth/github/callback', 'functions/api/oauth/github/callback.js'],
-  ['/api/health', 'functions/api/health.js'],
-]);
+const FUNCTIONS = path.join(ROOT, 'functions');
+
+/**
+ * Resolve a request path to a Pages Function, the way Pages does:
+ * an exact file first, then a `[[path]]` catch-all in the nearest folder.
+ *   /api/llm/kilo/chat/completions → functions/api/llm/[[path]].js  (path: kilo/chat/completions)
+ *   /api/npm/ms                    → functions/api/npm/[[path]].js
+ */
+function resolveFunction(pathname) {
+  const parts = pathname.split('/').filter(Boolean);
+  if (!parts.length || parts[0] !== 'api') return null;
+  const direct = path.join(FUNCTIONS, `${parts.join('/')}.js`);
+  if (fs.existsSync(direct)) return { file: direct, params: {} };
+  for (let i = parts.length - 1; i >= 1; i--) {
+    const catchAll = path.join(FUNCTIONS, ...parts.slice(0, i), '[[path]].js');
+    if (fs.existsSync(catchAll)) return { file: catchAll, params: { path: parts.slice(i) } };
+  }
+  return null;
+}
+
+/** The headers `functions/_middleware.js` would add in production. */
+function platformHeaders(req, extra = {}) {
+  const isolated = String(req.headers.cookie || '')
+    .split(';')
+    .some((pair) => pair.trim().startsWith('nex_wc='));
+  return {
+    'Content-Security-Policy': [
+      "default-src 'self'",
+      "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://cdn.jsdelivr.net https://cdn.tailwindcss.com https://unpkg.com https://esm.sh https://cdnjs.cloudflare.com",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data: blob:",
+      "font-src 'self' data:",
+      // The relay and the providers both need HTTPS, and esm.sh serves the
+      // compiler/container SDKs used by the opt-in runtimes.
+      "connect-src 'self' blob: data: https:",
+      "worker-src 'self' blob:",
+      "frame-src 'self' blob: data: https:",
+      "media-src 'self' blob: data:",
+      "object-src 'none'",
+      "base-uri 'none'",
+      "form-action 'self'",
+      "frame-ancestors 'self'",
+    ].join('; '),
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
+    'Cross-Origin-Opener-Policy': isolated ? 'same-origin' : 'same-origin-allow-popups',
+    ...(isolated ? { 'Cross-Origin-Embedder-Policy': 'credentialless' } : {}),
+    ...extra,
+  };
+}
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
-  const route = starts.get(url.pathname);
+  const route = resolveFunction(url.pathname);
 
   if (route) {
     try {
-      const mod = await import(path.join(ROOT, route));
-      const handler = mod.onRequestGet || mod.onRequest;
-      const response = await handler({
-        request: new Request(url.toString(), { method: req.method, headers: req.headers }),
-        env: process.env,
+      const mod = await import(path.join(route.file));
+      const handler = mod.onRequest || mod.onRequestGet || mod.default;
+      if (typeof handler !== 'function') throw new Error(`${path.basename(route.file)} has no onRequest export`);
+      const hasBody = !['GET', 'HEAD'].includes(req.method);
+      const chunks = [];
+      for await (const chunk of hasBody ? req : []) chunks.push(chunk);
+      const request = new Request(url.toString(), {
+        method: req.method,
+        headers: req.headers,
+        body: hasBody ? Buffer.concat(chunks) : undefined,
       });
-      res.writeHead(response.status, Object.fromEntries(response.headers));
-      res.end(Buffer.from(await response.arrayBuffer()));
+      const response = await handler({ request, env: process.env, params: route.params, next: async () => new Response('not found', { status: 404 }) });
+      const headers = platformHeaders(req, Object.fromEntries(response.headers));
+      res.writeHead(response.status, headers);
+      if (response.body) {
+        Readable.fromWeb(response.body).pipe(res);
+      } else {
+        res.end(Buffer.from(await response.arrayBuffer()));
+      }
     } catch (err) {
       res.writeHead(500, { 'Content-Type': 'text/plain' });
       res.end(`Function failed: ${err.message}`);
@@ -76,11 +133,13 @@ const server = http.createServer(async (req, res) => {
   if (fs.existsSync(file) && fs.statSync(file).isDirectory()) file = path.join(file, 'index.html');
   if (!fs.existsSync(file)) file = path.join(DIST, 'index.html');
   const body = await fsp.readFile(file);
-  res.writeHead(200, {
-    'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
-    'Cache-Control': file.includes('/assets/') ? 'public, max-age=3600' : 'no-store',
-    'X-Content-Type-Options': 'nosniff',
-  });
+  res.writeHead(
+    200,
+    platformHeaders(req, {
+      'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
+      'Cache-Control': file.includes('/assets/') ? 'public, max-age=3600' : 'no-store',
+    }),
+  );
   res.end(body);
 });
 

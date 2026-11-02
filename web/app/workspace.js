@@ -107,7 +107,12 @@ function togglePicker(force) {
 const HARNESS = `<script>(function(){
   // The preview runs in an opaque-origin sandbox, so localStorage/cookies throw.
   // Give generated pages an in-memory stand-in instead of a crash.
-  try{ localStorage.getItem('alpha'); }catch(_){
+  // Detect an opaque origin instead of probing storage: touching localStorage
+  // throws a SecurityError that the browser still reports in DevTools even
+  // though it is caught, and a preview full of red is not a good first look.
+  var opaqueOrigin = true;
+  try{ opaqueOrigin = self.origin === 'null' || !self.origin; }catch(_){ opaqueOrigin = true; }
+  if(opaqueOrigin){
     var mem=Object.create(null);
     var shim={getItem:function(k){return k in mem?mem[k]:null},setItem:function(k,v){mem[k]=String(v)},removeItem:function(k){delete mem[k]},clear:function(){mem=Object.create(null)},key:function(i){var k=Object.keys(mem)[i];return k===undefined?null:k}};
     Object.defineProperty(shim,'length',{get:function(){return Object.keys(mem).length}});
@@ -226,8 +231,13 @@ function bindConsole() {
   };
 }
 
+export function setPromptValue(text) {
+  const node = $('#prompt');
+  if (node) setPrompt(node, text);
+}
+
 /** Fill the composer the way a keystroke would, so every listener stays honest. */
-function setPrompt(node, text) {
+export function setPrompt(node, text) {
   node.value = text;
   node.dispatchEvent(new Event('input', { bubbles: true }));
   autoGrow(node);
@@ -388,46 +398,92 @@ function bindSuggestions() {
   $('#btn-attach').onclick = () => pickAttachment();
 }
 
-async function pickAttachment() {
+export async function pickAttachment() {
+  const state = api.getState?.();
   const input = document.createElement('input');
   input.type = 'file';
-  input.accept = 'image/*,text/*,.md,.json,.csv,.sql,.html,.css,.js,.ts,.tsx,.py';
+  input.multiple = true;
+  input.accept = 'image/*,text/*,.md,.json,.csv,.sql,.html,.css,.js,.jsx,.ts,.tsx,.py,.svg,.yml,.yaml,.toml';
   input.onchange = async () => {
-    const file = input.files?.[0];
-    if (!file) return;
-    const text = await file.text().catch(() => '');
-    const prompt = $('#prompt');
-    const preview = text.length > 4000 ? `${text.slice(0, 4000)}\n… [truncated]` : text;
-    setPrompt(prompt, `${prompt.value}\n\n--- ${file.name} ---\n${preview}`.trim());
-    prompt.focus();
-    api.toast?.(`Attached ${file.name}`, 'ok');
+    const files = [...(input.files || [])];
+    if (!files.length) return;
+    state.attachments = state.attachments || [];
+    for (const file of files) {
+      if (state.attachments.length >= 6) {
+        uiToast('Six attachments is the limit for one message', 'warn');
+        break;
+      }
+      const isImage = file.type.startsWith('image/');
+      const text = isImage ? '' : await file.text().catch(() => '');
+      state.attachments.push({ name: file.name, size: file.size, kind: isImage ? 'image' : 'text', text, url: isImage ? URL.createObjectURL(file) : '' });
+    }
+    api.renderAttachments?.();
+    $('#prompt')?.focus();
   };
   input.click();
 }
 
 /* -------------------------------------------------------------- mobile panes -- */
 
-function bindMobilePanes() {
-  const bar = el('div', { class: 'mobile-panes', role: 'tablist' });
-  bar.innerHTML = `
-    <button data-pane="chat" class="active">${icon('chat', 13)} Build</button>
-    <button data-pane="preview">${icon('eye', 13)} Preview</button>`;
-  document.body.append(bar);
-  for (const button of bar.querySelectorAll('button')) {
-    button.onclick = () => {
-      $('#app').dataset.mobilePane = button.dataset.pane;
-      for (const other of bar.querySelectorAll('button')) other.classList.toggle('active', other === button);
-      if (button.dataset.pane === 'preview') refreshPreview({ force: true });
-    };
+const PANE_FOR_VIEW = { files: 'files', terminal: 'terminal', chat: 'chat', db: 'files', deploy: 'preview' };
+const VIEW_FOR_PANE = { chat: 'chat', files: 'files', terminal: 'terminal', preview: null };
+
+export function setMobilePane(pane) {
+  const app = $('#app');
+  if (!app) return;
+  const next = ['chat', 'files', 'terminal', 'preview'].includes(pane) ? pane : 'chat';
+  app.dataset.mobilePane = next;
+  for (const button of $$('#mobile-nav .mnav-item')) {
+    const active = button.dataset.pane === next;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', String(active));
   }
-  $('#btn-menu').onclick = () => {
-    $('#sidebar').classList.toggle('open');
-    $('#scrim').hidden = !$('#sidebar').classList.contains('open');
+  if (next === 'preview') {
+    if (api.getState?.().view !== 'chat' && api.setView) api.setView('chat');
+    requestAnimationFrame(() => refreshPreview({ force: true }));
+  } else if (next === 'files') {
+    if (api.getState?.().view !== 'files') api.setView?.('files');
+  } else if (next === 'terminal') {
+    if (api.getState?.().view !== 'terminal') api.setView?.('terminal');
+    requestAnimationFrame(() => api.focusTerminal?.());
+  } else if (api.getState?.().view !== 'chat') {
+    api.setView?.('chat');
+  }
+  // The dot means "the agent is working and you are not watching it".
+  const badge = $('#mnav-badge');
+  if (badge) badge.hidden = next === 'chat' || !api.getState?.().running;
+  api.saveSettings?.({ mobilePane: next });
+}
+
+export function currentMobilePane() {
+  return $('#app')?.dataset.mobilePane || 'chat';
+}
+
+function bindMobilePanes() {
+  for (const button of $$('#mobile-nav .mnav-item')) {
+    button.onclick = () => setMobilePane(button.dataset.pane);
+  }
+  const openMenu = () => {
+    $('#sidebar').classList.add('open');
+    $('#scrim').hidden = false;
+    document.body.classList.add('menu-open');
   };
-  $('#scrim').onclick = () => {
+  const closeMenu = () => {
     $('#sidebar').classList.remove('open');
     $('#scrim').hidden = true;
+    document.body.classList.remove('menu-open');
   };
+  $('#btn-menu').onclick = openMenu;
+  $('#btn-close-menu')?.addEventListener('click', closeMenu);
+  $('#scrim').onclick = closeMenu;
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') closeMenu();
+  });
+  // Leave the drawer open only while the user is choosing something.
+  $('#sidebar').addEventListener('click', (event) => {
+    if (event.target.closest('button, a') && window.innerWidth <= 820) setTimeout(closeMenu, 120);
+  });
+  if (api.getState?.().settings?.mobilePane) setMobilePane(api.getState().settings.mobilePane);
 }
 
 /* ------------------------------------------------------------------ jobs --- */

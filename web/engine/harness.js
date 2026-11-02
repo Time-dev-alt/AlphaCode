@@ -117,6 +117,12 @@ function parseArgs(raw) {
 
 const estimate = (text) => Math.ceil(String(text || '').length / 3.6);
 
+/** Commands that cannot change the workspace, so they never need approval. */
+const READ_ONLY_COMMANDS = new Set([
+  'ls', 'cat', 'head', 'tail', 'wc', 'pwd', 'tree', 'find', 'grep', 'stat', 'du', 'date',
+  'which', 'echo', 'env', 'printenv', 'whoami', 'rg', 'file', 'diff', 'sort', 'uniq',
+]);
+
 export class Harness {
   /**
    * @param {object} deps
@@ -346,9 +352,25 @@ ${this.plan ? `\n## Plan (approved)\n${this.plan}\n` : ''}${subagentType ? `\nYo
     return risks;
   }
 
+  /**
+   * A shell command that only reads cannot damage anything, so it should not
+   * interrupt a run. Anything with a redirection, a pipe into a shell, or a
+   * mutating verb still asks.
+   */
+  isReadOnlyShell(args) {
+    const cmd = String(args.command || '').trim();
+    if (!cmd) return false;
+    if (/[>|]|&&|;|\$\("?/.test(cmd) && !/\|\s*(head|tail|wc|sort|uniq|grep|cat)\b/.test(cmd)) return false;
+    const first = cmd.split(/\s+/)[0].replace(/^.*\//, '');
+    return READ_ONLY_COMMANDS.has(first) && !/\brm\b|\bmv\b|\bcp\b|\btouch\b|\bmkdir\b|\bnpm\b|\bnpx\b|\bpip\b|\bnode\b/.test(cmd);
+  }
+
   async gate(tool, args) {
     if (this.mode === 'bypass') return { approved: true };
     if (this.mode === 'accept-edits' && (tool.name === 'write' || tool.name === 'edit' || tool.name === 'multiedit')) return { approved: true };
+    if (tool.name === 'bash' && this.isReadOnlyShell(args) && (this.mode === 'accept-edits' || this.mode === 'default')) {
+      return { approved: true, note: 'read-only command' };
+    }
     // default: reads and bookkeeping are free, everything that mutates asks.
     // accept-edits: file writes are free too; shell/db/deploy still ask.
     if (this.mode === 'default' && tool.readOnly) return { approved: true };
@@ -367,6 +389,9 @@ ${this.plan ? `\n## Plan (approved)\n${this.plan}\n` : ''}${subagentType ? `\nYo
 
   async executeToolCalls(calls, tools) {
     const results = [];
+    // The card title is derived from the arguments, which are not persisted —
+    // remembering it here is what lets a reloaded transcript look like the live one.
+    const toolTitles = new Map();
     for (const call of calls) {
       const tool = tools.find((t) => t.name === call.name);
       if (!tool) {
@@ -397,7 +422,9 @@ ${this.plan ? `\n## Plan (approved)\n${this.plan}\n` : ''}${subagentType ? `\nYo
         if (pre.note) notes.push(pre.note);
       }
 
-      this.emit({ type: 'tool_start', toolCallId: call.id, name: tool.name, args: sanitizeArgs(args), title: toolTitle(tool.name, args), readOnly: Boolean(tool.readOnly) });
+      const title = toolTitle(tool.name, args);
+      toolTitles.set(call.id, title);
+      this.emit({ type: 'tool_start', toolCallId: call.id, name: tool.name, args: sanitizeArgs(args), title, readOnly: Boolean(tool.readOnly) });
       const decision = hookApproved ? { approved: true, reason: 'hook' } : await this.gate(tool, args);
       if (!decision.approved) {
         this.emit({ type: 'tool_end', toolCallId: call.id, name: tool.name, ok: false, summary: decision.reason || 'denied', durationMs: Date.now() - started });
@@ -413,8 +440,9 @@ ${this.plan ? `\n## Plan (approved)\n${this.plan}\n` : ''}${subagentType ? `\nYo
         }
         if (notes.length) out.text = `${out.text}\n\n[hooks] ${notes.join(' · ')}`;
         const summary = await summarize(tool, out);
+        const cardTitle = toolTitles.get(call.id) || '';
         this.emit({ type: 'tool_end', toolCallId: call.id, name: tool.name, ok: !out.isError, summary, display: out.display || null, durationMs: Date.now() - started });
-        results.push({ id: call.id, name: tool.name, content: out.text, isError: Boolean(out.isError), display: out.display });
+        results.push({ id: call.id, name: tool.name, title: cardTitle, content: out.text, isError: Boolean(out.isError), display: out.display });
       } catch (err) {
         this.emit({ type: 'tool_end', toolCallId: call.id, name: tool.name, ok: false, summary: String(err.message).slice(0, 160), durationMs: Date.now() - started });
         results.push({ id: call.id, name: tool.name, content: `Error: ${err.message}`, isError: true });
@@ -461,7 +489,7 @@ ${this.plan ? `\n## Plan (approved)\n${this.plan}\n` : ''}${subagentType ? `\nYo
       const toolResults = await this.executeToolCalls(result.toolCalls, tools);
       for (const tr of toolResults) {
         this.messages.push({ role: 'tool', tool_call_id: tr.id, name: tr.name, content: tr.content });
-        await this.store.addMessage(this.threadId, 'tool', { toolCallId: tr.id, name: tr.name, content: tr.content, isError: tr.isError, display: tr.display });
+        await this.store.addMessage(this.threadId, 'tool', { toolCallId: tr.id, name: tr.name, title: tr.title || '', content: tr.content, isError: tr.isError, display: tr.display });
       }
     }
     if (finishReason === 'stop' && this.usage.calls >= MAX_ITERATIONS) finishReason = 'max_iterations';

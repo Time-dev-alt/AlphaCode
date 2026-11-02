@@ -19,10 +19,28 @@ import { JobManager } from '../engine/jobs.js';
 import { loadHooks } from '../engine/hooks.js';
 import { runWasi, compileC, canCompileC, RUNTIME_MATRIX } from '../engine/native.js';
 import { connectAll, contentToText } from '../engine/mcp.js';
-import { mountWorkspace, refreshPreview, renderJobs, renderHistory, setLayout } from './workspace.js';
+import { mountWorkspace, refreshPreview, renderJobs, renderHistory, setLayout, setMobilePane, pickAttachment, setPromptValue } from './workspace.js';
 import { zipSync, download } from '../engine/zip.js';
 import { TerminalView } from '../../public/assets/term.js';
-import { $, $$, el, icon, paintIcons, toast, md, renderDiff, timeAgo, bytes, escapeHtml, copyText, debounce } from './ui.js';
+import { mountFiles, refreshFileTree, openFile, saveActiveFile, downloadProjectZip, pickFiles } from './files.js';
+import {
+  mountActivity,
+  resetActivity,
+  activityStarted,
+  pushActivity,
+  patchActivity,
+  finishActivity,
+  setCollapsed as setActivityCollapsed,
+  activityForTool,
+  currentStep,
+  settleStep,
+  noteActivity,
+  setThought,
+  markToggled,
+} from './activity.js';
+import { $, $$, el, icon, paintIcons, toast, md, renderDiff, timeAgo, bytes, escapeHtml, copyText, debounce, askText, askConfirm } from './ui.js';
+
+const isMobile = () => window.matchMedia('(max-width: 820px)').matches;
 
 const state = {
   store: null,
@@ -46,8 +64,9 @@ const state = {
   dbs: new Map(),
   dbPath: '',
   termView: null,
-  editorPath: '',
-  editorDirty: false,
+  attachments: [],
+  activityByTool: new Map(),
+  reasoningStep: null,
   github: null,
   deployments: [],
   pendingClaim: '',
@@ -199,7 +218,13 @@ function commands() {
     { group: 'Views', name: 'Deploy', icon: 'rocket', run: go('deploy') },
     { group: 'Actions', name: 'Send message', icon: 'arrow-up', sub: '⌘↵', run: async () => { close(); send($('#prompt').value); } },
     { group: 'Actions', name: 'Attach a file', icon: 'paperclip', run: async () => { close(); $('#btn-attach').click(); } },
-    { group: 'Actions', name: 'Export project as ZIP', icon: 'download', run: async () => { close(); exportProject(); } },
+    { group: 'Files', name: 'Export project as a ZIP', icon: 'download', sub: 'files', run: async () => { close(); setView('files'); downloadProjectZip(); } },
+    { group: 'Files', name: 'New file', icon: 'plus', run: async () => { close(); setView('files'); $('#btn-new-file').click(); } },
+    { group: 'Files', name: 'Upload files', icon: 'upload', run: async () => { close(); setView('files'); pickFiles(); } },
+    { group: 'Files', name: 'Import a GitHub repository', icon: 'github', run: async () => { close(); setView('files'); $('#btn-import-repo').click(); } },
+    { group: 'Files', name: 'Save the open file', icon: 'check', sub: '⌘S', run: async () => { close(); saveActiveFile(); } },
+    { group: 'Actions', name: 'Focus the terminal', icon: 'terminal', run: async () => { close(); setView('terminal'); focusTerminal(); } },
+    { group: 'Actions', name: 'Export every project as JSON', icon: 'download', run: async () => { close(); exportProject(); } },
     { group: 'Actions', name: 'Toggle theme', icon: currentTheme() === 'light' ? 'moon' : 'sun', sub: '⌘⇧L', run: async () => { close(); toggleTheme(); } },
     { group: 'Actions', name: 'Runtime status', icon: 'cpu', run: async () => { close(); renderRuntimePanel(); } },
     { group: 'Actions', name: 'Settings', icon: 'sliders', run: async () => { close(); openSettings(); } },
@@ -327,7 +352,33 @@ function openShortcuts() {
 
 /* ------------------------------------------------------------------ boot -- */
 
+/**
+ * Measure the notch once and hand it to CSS as a variable.
+ *
+ * Reading env() inside a declaration is not safe: engines that parse it but
+ * cannot resolve it throw away the whole declaration at computed-value time
+ * (which silently collapses the bottom bar). A measured pixel value cannot fail.
+ */
+function detectSafeArea() {
+  const probe = document.createElement('div');
+  probe.style.cssText =
+    'position:fixed;left:0;right:0;bottom:0;height:env(safe-area-inset-bottom,0px);pointer-events:none;opacity:0;z-index:-1';
+  const top = document.createElement('div');
+  top.style.cssText = 'position:fixed;left:0;right:0;top:0;height:env(safe-area-inset-top,0px);pointer-events:none;opacity:0;z-index:-1';
+  document.body.append(probe, top);
+  const bottom = Math.round(probe.getBoundingClientRect().height) || 0;
+  const upper = Math.round(top.getBoundingClientRect().height) || 0;
+  probe.remove();
+  top.remove();
+  const root = document.documentElement;
+  root.style.setProperty('--safe-bottom', `${bottom}px`);
+  root.style.setProperty('--safe-top', `${upper}px`);
+  root.style.setProperty('--nav-offset', `${58 + bottom}px`);
+  root.style.setProperty('--side-top', `${12 + upper}px`);
+}
+
 async function boot() {
+  detectSafeArea();
   paintIcons();
   state.store = await createStore();
   // Probe for real storage instead of trusting feature detection: OPFS throws
@@ -336,11 +387,26 @@ async function boot() {
   state.fs = await createFsAsync();
   state.storage = state.fs.mode;
   state.settings = await state.store.settings();
-  state.mode = state.settings.mode || 'default';
+  // New people get file writes without a prompt; that is the whole promise of
+  // "describe it and watch it appear". Shell, deletes and deploys still ask.
+  state.mode = state.settings.mode || 'accept-edits';
   state.model = state.settings.model || GUEST_MODEL;
   state.github = state.settings.github || null;
 
   wireGlobal();
+  // These two own the file tree and the activity panel; opening a project
+  // refreshes both, so they have to be mounted before that happens.
+  mountFiles({
+    getState: () => state,
+    setView,
+    toast,
+    ask: (opts) => askText(opts),
+    confirm: (opts) => askConfirm(opts),
+    onFilesChanged: () => refreshFiles(),
+  });
+  mountActivity();
+  trackTranscriptScroll();
+  keepTranscriptPinned();
   if (state.settings.pane === 'preview-hidden') $('#app').dataset.pane = 'preview-hidden';
   await refreshProjects();
   const last = state.settings.lastProject;
@@ -376,6 +442,8 @@ async function boot() {
     toast,
     setView,
     refreshFiles,
+    focusTerminal: () => focusTerminal(),
+    renderAttachments: () => renderAttachments(),
     onSend: () => $('#btn-send').click(),
     onPublish: () => {
       setView('deploy');
@@ -560,9 +628,8 @@ async function openProject(id) {
   await renderDeployments();
   state.dbs.clear();
   state.dbPath = '';
-  state.editorPath = '';
-  $('#editor').value = '';
-  $('#editor-path').textContent = 'No file selected';
+
+  refreshFileTree({ keepOpen: false });
   state.node = createNodeSession({
     fs: state.fs,
     projectId: id,
@@ -653,31 +720,160 @@ function renderTranscript() {
     renderWelcome();
     return;
   }
+  // Replay has to rebuild the same shape a live run produces: each answer gets
+  // its own turn, and the tool calls that produced it nest inside it. Appending
+  // cards to the transcript root instead would stack them above the history.
+  state.turn = null;
+  state.lastTurn = null;
   for (const m of state.messages) {
-    if (m.role === 'user') appendUser(m.content?.text || '');
-    else if (m.role === 'assistant' && m.content?.text?.trim()) appendAssistant(m.content.text);
-    else if (m.role === 'tool') {
-      const card = appendTool({ name: m.content?.name || 'tool', title: '', args: {} });
-      finishTool(card, { ok: !m.content?.isError, summary: firstLine(m.content?.content), display: m.content?.display, output: m.content?.content });
+    if (m.role === 'user') {
+      state.turn = null;
+      appendUser(m.content?.text || '');
+    } else if (m.role === 'assistant') {
+      // An empty assistant message is the model asking for tools: it belongs to
+      // the turn already open, so it must not start a new one.
+      if (m.content?.text?.trim()) appendAssistant(m.content.text);
+    } else if (m.role === 'tool') {
+      const turn = ensureTurn();
+      turn.meta.querySelector('.turn-model').textContent = 'history';
+      const content = m.content || {};
+      const card = appendTool({ name: content.name || 'tool', title: content.title || '', args: {} });
+      finishTool(card, {
+        ok: !content.isError,
+        summary: summaryForStored(content),
+        display: content.display,
+        output: content.content,
+      });
+      state.turn = turn;
     }
   }
-  scrollTranscript();
+  // A turn that only ever made tool calls should not keep a live dot.
+  state.turn?.meta.querySelector('.dot')?.classList.remove('live');
+  state.turn = null;
+  state.lastTurn = null;
+  for (const stale of inner.querySelectorAll('.turn-meta .dot.live')) stale.classList.remove('live');
+  scrollTranscript(true);
 }
 
 const firstLine = (s) => String(s || '').split('\n').find((l) => l.trim())?.slice(0, 140) || '';
 
+/** Rebuild the same summary the live run showed, from what was persisted. */
+function summaryForStored(content) {
+  const display = content.display;
+  if (display?.kind === 'diff') {
+    const lines = String(display.diff || '').split('\n');
+    const added = lines.filter((l) => l.startsWith('+')).length;
+    const removed = lines.filter((l) => l.startsWith('-')).length;
+    return `+${added} −${removed} · ${display.path || ''}`;
+  }
+  if (display?.kind === 'bash') return `exit ${display.exitCode}`;
+  if (display?.kind === 'files') return `${display.files?.length || 0} files`;
+  if (display?.kind === 'search') return `${display.hits?.length || 0} matches`;
+  if (display?.kind === 'todos') return `${display.todos?.length || 0} todos`;
+  return firstLine(content.content);
+}
+
+/**
+ * Is the reader at the bottom of the conversation?
+ *
+ * Tracked via a `scroll` listener instead of measured on demand, because when a
+ * new answer arrives the content has already grown — measuring then would always
+ * say "not at the bottom" and nothing would follow the stream.
+ */
+let transcriptPinned = true;
+
+function trackTranscriptScroll() {
+  const host = $('#transcript');
+  if (!host) return;
+  host.addEventListener('scroll', () => {
+    transcriptPinned = host.scrollHeight - host.scrollTop - host.clientHeight < 60;
+  }, { passive: true });
+}
+
 function scrollTranscript(force) {
   const host = $('#transcript');
   if (!host) return;
-  const nearBottom = host.scrollHeight - host.scrollTop - host.clientHeight < 180;
-  if (force || nearBottom) host.scrollTop = host.scrollHeight;
+  if (force) transcriptPinned = true;
+  if (transcriptPinned) host.scrollTop = host.scrollHeight;
 }
 
-function appendUser(text) {
+/**
+ * Content grows for reasons that never fire a scroll event: an answer streams
+ * in, the activity log folds away, a tool card expands. Watching the transcript's
+ * size keeps the newest line in view without fighting a reader who scrolled up.
+ */
+function keepTranscriptPinned() {
+  const host = $('#transcript');
+  if (!host || typeof ResizeObserver === 'undefined') return;
+  const sync = () => {
+    if (transcriptPinned) host.scrollTop = host.scrollHeight;
+  };
+  new ResizeObserver(sync).observe(host);
+  const inner = $('#transcript-inner');
+  if (inner) new ResizeObserver(sync).observe(inner);
+}
+
+/**
+ * Attachment chips live in the composer, above the textarea: a file is attached
+ * to the message, not pasted into it, so the message you wrote stays readable.
+ */
+function renderAttachments() {
+  const strip = $('#attach-strip');
+  if (!strip) return;
+  const files = state.attachments || [];
+  if (!files.length) {
+    strip.hidden = true;
+    strip.innerHTML = '';
+    return;
+  }
+  strip.hidden = false;
+  strip.innerHTML = files
+    .map(
+      (file, index) => `<span class="attach-chip ${file.kind}">
+        ${file.kind === 'image' && file.url ? `<img src="${file.url}" alt="">` : icon('file', 12)}
+        <span class="attach-name">${escapeHtml(file.name)}</span>
+        <span class="attach-size">${bytes(file.size)}</span>
+        <button class="attach-x" data-detach="${index}" aria-label="Remove ${escapeHtml(file.name)}">${icon('close', 10)}</button>
+      </span>`,
+    )
+    .join('');
+  strip.querySelectorAll('[data-detach]').forEach((button) => {
+    button.onclick = () => {
+      const [removed] = state.attachments.splice(Number(button.dataset.detach), 1);
+      if (removed?.url) URL.revokeObjectURL(removed.url);
+      renderAttachments();
+      syncSendState();
+    };
+  });
+}
+
+/** Fold attachment text into what the model receives, keeping the bubble clean. */
+function messageWithAttachments(text) {
+  const files = state.attachments || [];
+  if (!files.length) return text;
+  const blocks = files
+    .map((file) => {
+      if (file.kind === 'image') return `--- ${file.name} (image) ---\n[image attached: ${file.name}]`;
+      const body = file.text.length > 12_000 ? `${file.text.slice(0, 12_000)}\n… [truncated ${bytes(file.text.length - 12_000)}]` : file.text;
+      return `--- ${file.name} ---\n${body}`;
+    })
+    .join('\n\n');
+  return `${text}\n\n${blocks}`.trim();
+}
+
+function appendUser(text, attachments = []) {
   const inner = transInner();
   inner.classList.remove('is-empty');
   inner.querySelector('.welcome')?.remove();
-  inner.append(el('div', { class: 'msg user', html: `<div class="bubble">${escapeHtml(text).replace(/\n/g, '<br>')}</div>` }));
+  const chips = attachments.length
+    ? `<div class="bubble-attachments">${attachments
+        .map(
+          (file) =>
+            `<span class="bubble-file">${icon(file.kind === 'image' ? 'camera' : 'file', 11)}${escapeHtml(file.name)}<span class="bubble-file-size">${bytes(file.size)}</span></span>`,
+        )
+        .join('')}</div>`
+    : '';
+  inner.append(el('div', { class: 'msg user', html: `<div class="bubble">${escapeHtml(text).replace(/\n/g, '<br>')}${chips}</div>` }));
   scrollTranscript(true);
 }
 
@@ -731,7 +927,7 @@ const TOOL_LABEL = {
 
 const toolLabel = (name) => TOOL_LABEL[name] || (name.startsWith('mcp__') ? name.split('__')[1] === undefined ? 'MCP' : 'MCP' : name);
 
-function appendTool({ name, title, args }) {
+function appendTool({ name, title, args, activityId = '' }) {
   const turn = state.turn || state.lastTurn;
   const host = turn?.tools || transInner();
   const card = el('div', { class: 'tool' });
@@ -753,6 +949,7 @@ function appendTool({ name, title, args }) {
       card.querySelector('.tool-head').click();
     }
   };
+  if (activityId) card.dataset.activityId = activityId;
   host.append(card);
   card._out = '';
   scrollTranscript();
@@ -826,11 +1023,19 @@ async function send(text) {
 
   const inner = transInner();
   inner.querySelector('.welcome')?.remove();
-  appendUser(text);
-  $('#prompt').value = '';
+  const outgoing = messageWithAttachments(text);
+  appendUser(text, state.attachments || []);
+  state.attachments = [];
+  renderAttachments();
+  setPromptValue('');
   autoGrow();
   syncSendState();
+  resetActivity();
+  activityStarted();
+  state.activityProviderErrors = [];
+  pushActivity({ kind: 'think', title: 'Reading the request', state: 'run' });
   setRunning(true);
+  if (isMobile()) setMobilePane('chat');
 
   const run = new Run({ id: uid('run_', 5), threadId: state.thread.id, projectId: state.project.id, mode: state.mode, model: state.model });
   state.run = run;
@@ -883,7 +1088,7 @@ async function send(text) {
   run.onEvent(handleEvent);
   run.status = 'running';
   try {
-    const result = await harness.send(text);
+    const result = await harness.send(outgoing);
     run.emit({ type: 'done', finishReason: result.finishReason, steps: harness.usage.calls, usage: harness.usage, filesChanged: [...harness.filesChanged] });
   } catch (err) {
     if (err?.name !== 'AbortError') run.emit({ type: 'error', message: err.message });
@@ -902,10 +1107,14 @@ async function send(text) {
 
 function handleEvent(ev) {
   switch (ev.type) {
-    case 'model':
+    case 'model': {
       $('#chip-model-txt').textContent = `${ev.model.split('/').pop()}`;
       setStatus(`calling ${ev.label || ev.provider}…`);
+      // A turn can call the model many times: keep one row and retitle it rather
+      // than printing a line per round.
+      setThought(`Thinking via ${ev.label || ev.provider}`);
       break;
+    }
     case 'text':
       ensureTurn().text += ev.text;
       onTextFlush();
@@ -919,6 +1128,9 @@ function handleEvent(ev) {
       }
       break;
     case 'reasoning': {
+      if (!state.reasoningStep) {
+        state.reasoningStep = pushActivity({ kind: 'think', title: 'Working through the change', state: 'run' });
+      }
       const turn = ensureTurn();
       turn.reasoning.hidden = false;
       turn.hasReasoning = true;
@@ -934,20 +1146,40 @@ function handleEvent(ev) {
       state.activeTool = card;
       turn.meta.querySelector('.turn-model').textContent = `${ev.name}…`;
       setStatus(`${ev.name}…`);
+      settleStep('think');
+      setThought('');
+      const step = activityForTool(ev.name, ev.args || {}, null, ev.title || '');
+      state.activityByTool = state.activityByTool || new Map();
+      state.activityByTool.set(
+        ev.toolCallId,
+        pushActivity({ kind: step.kind, title: step.title || ev.title || ev.name, detail: step.detail, state: 'run' }),
+      );
       break;
     }
-    case 'tool_output':
+    case 'tool_output': {
       toolOutput(state.activeTool, ev.text);
+      const id = state.activeTool?.dataset?.toolId;
+      if (id) patchActivity(id, { detail: String(state.activeTool?._out || '').slice(-1600) });
       break;
+    }
     case 'tool_end': {
       const card = state.toolCards?.get(ev.toolCallId) || state.activeTool;
       finishTool(card, ev);
       state.toolCards?.delete(ev.toolCallId);
       if (state.activeTool === card) state.activeTool = null;
+      const stepId = state.activityByTool?.get(ev.toolCallId);
+      if (stepId) {
+        const failed = Boolean(ev.error) || ev.ok === false;
+        patchActivity(stepId, { state: failed ? 'error' : 'done', meta: ev.durationMs ? `${ev.durationMs}ms` : '', detail: ev.error || undefined });
+        state.activityByTool.delete(ev.toolCallId);
+      }
       break;
     }
     case 'todos':
       renderTodos(ev.todos);
+      if (Array.isArray(ev.todos) && ev.todos.length) {
+        pushActivity({ kind: 'plan', title: ev.todos[0].text || 'Plan updated', state: 'done', meta: `${ev.todos.length} items` });
+      }
       break;
     case 'plan':
       appendNotice(`Plan submitted:\n${ev.plan}`, 'plan');
@@ -963,6 +1195,8 @@ function handleEvent(ev) {
       appendNotice(ev.text, ev.level === 'warn' ? 'warn' : 'info');
       break;
     case 'provider_error': {
+      state.activityProviderErrors = state.activityProviderErrors || [];
+      state.activityProviderErrors.push(PROVIDERS[ev.provider]?.label || ev.provider);
       // A turn can try three free routers before the demo model answers. Showing
       // three stack traces to someone who just typed "build me a shop" is noise,
       // so they are buffered into one line once the turn actually produces output.
@@ -1011,13 +1245,25 @@ function handleEvent(ev) {
       }
       state.lastTurn = state.turn;
       state.turn = null;
+      state.reasoningStep = null;
+      if (state.activityProviderErrors?.length) {
+        const failed = [...new Set(state.activityProviderErrors)];
+        noteActivity(
+          `${failed.length} router${failed.length === 1 ? '' : 's'} unreachable — finished with the fallback model`,
+          failed.join(', '),
+        );
+        state.activityProviderErrors = [];
+      }
       setStatus('ready');
+      finishActivity();
       refreshPreview({ force: Boolean(ev.filesChanged?.length) });
       break;
     }
     case 'error':
       appendNotice(ev.message, 'err');
+      pushActivity({ kind: 'error', title: ev.message, state: 'error' });
       setStatus('ready');
+      finishActivity('error');
       break;
     default:
       break;
@@ -1072,6 +1318,15 @@ function setRunning(running) {
     state.turn = null;
     state.lastTurn = state.lastTurn || null;
   }
+  syncMobileBadge();
+}
+
+/** A dot on the Chat tab while the agent works and you are somewhere else. */
+function syncMobileBadge() {
+  const badge = $('#mnav-badge');
+  if (!badge) return;
+  const away = $('#app')?.dataset.mobilePane !== 'chat';
+  badge.hidden = !(state.running && away);
 }
 
 function setStatus(text) {
@@ -1093,7 +1348,6 @@ async function refreshFiles() {
   if (!state.project) return;
   state.tree = await state.fs.tree(state.project.id);
   state.files = flattenTree(state.tree);
-  renderTree();
   const fileCount = state.files.filter((f) => !f.dir).length;
   const tabCount = $('#tab-file-count');
   if (tabCount) tabCount.textContent = fileCount || '';
@@ -1106,63 +1360,26 @@ async function refreshFiles() {
   $('#storage-note').title = state.storage === 'memory'
     ? 'This browser context blocks persistent storage (private mode or a sandboxed frame). Files vanish on reload.'
     : 'Your files never leave this tab. Clearing site data deletes them.';
+  await refreshFileTree();
 }
 
 const STORAGE_LABEL = { opfs: 'real files in this browser', indexeddb: 'saved in this browser', memory: 'temporary memory' };
-
-function renderTree() {
-  const host = $('#file-tree');
-  host.innerHTML = '';
-  if (!state.files.length) {
-    host.innerHTML = '<div class="hint pad">Empty project. Ask the agent to build something.</div>';
-    return;
-  }
-  for (const node of state.files) {
-    const row = el('div', { class: `tree-row ${node.dir ? 'dir' : ''} ${node.path === state.editorPath ? 'active' : ''}` });
-    row.style.paddingLeft = `${8 + node.depth * 12}px`;
-    row.innerHTML = `${icon(node.dir ? 'folder' : 'file', 13)}<span class="path">${escapeHtml(node.path.split('/').pop())}</span>${node.dir ? '' : `<span class="size">${bytes(node.size || 0)}</span>`}`;
-    if (!node.dir) row.onclick = () => openFile(node.path);
-    host.append(row);
-  }
-}
-
-async function openFile(path) {
-  if (isBinaryPath(path)) {
-    toast(`${path} is binary — export the project to inspect it`, 'warn');
-    return;
-  }
-  try {
-    const text = await state.fs.readText(state.project.id, path);
-    $('#editor').value = text;
-    $('#editor-path').textContent = path;
-    $('#btn-save-file').hidden = false;
-    state.editorPath = path;
-    state.editorDirty = false;
-    renderTree();
-    setView('files');
-  } catch (err) {
-    toast(err.message, 'err');
-  }
-}
-
-async function saveFile() {
-  if (!state.editorPath) return;
-  await state.fs.write(state.project.id, state.editorPath, $('#editor').value);
-  state.editorDirty = false;
-  toast(`Saved ${state.editorPath}`, 'ok', 1600);
-  await refreshFiles();
-}
 
 /* -------------------------------------------------------------- terminal --- */
 
 function mountTerminal(force) {
   const host = $('#term-host');
+  if (!host) return;
   if (!state.termView || force) {
     host.innerHTML = '';
     if (!state.shell) return;
+    // Measure the real cell size so lines wrap where the CSS says they wrap.
+    const box = host.getBoundingClientRect();
+    const cols = Math.max(40, Math.floor((box.width || 760) / 7.7));
+    const rows = Math.max(8, Math.floor(((box.height || 400) - 18) / 19));
     state.termView = new TerminalView(host, {
-      cols: 100,
-      rows: 26,
+      cols,
+      rows,
       onInput: (data) => handleTermInput(data),
       onResize: () => {},
       onBell: () => {},
@@ -1170,8 +1387,68 @@ function mountTerminal(force) {
     state.termBuf = '';
     state.termView.write('\u001b[1;36mAlphaCode shell\u001b[0m — project files, real commands. Type \u001b[1mhelp\u001b[0m.\r\n\r\n');
     prompt();
+    requestAnimationFrame(() => state.termView?.fit?.());
   }
-  state.termView.focus?.();
+  focusTerminal();
+}
+
+/** Keep the grid in step with the pane when the window or the view changes. */
+function bindTerminalResize() {
+  let timer = 0;
+  const refit = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      if (state.termView && state.view === 'terminal') {
+        state.termView.fit?.();
+        state.termView.scrollToBottom?.();
+      }
+    }, 120);
+  };
+  window.addEventListener('resize', refit);
+  window.addEventListener('orientationchange', refit);
+  return refit;
+}
+
+/** Put the caret in the terminal without yanking the page around on phones. */
+function focusTerminal() {
+  const view = state.termView;
+  if (!view) return;
+  try {
+    view.focus();
+    view.scrollToBottom?.();
+  } catch {
+    /* not mounted yet */
+  }
+}
+
+const TERM_KEYS = {
+  esc: '\x1b',
+  tab: '\t',
+  'ctrl-c': '\x03',
+  'ctrl-d': '\x04',
+  up: '\x1b[A',
+  down: '\x1b[B',
+  left: '\x1b[D',
+  right: '\x1b[C',
+};
+
+function bindTermKeys() {
+  for (const button of $$('#term-keys .key')) {
+    button.onclick = () => {
+      const key = button.dataset.key;
+      if (key === 'clear') {
+        state.termView?.clear?.();
+        prompt();
+        focusTerminal();
+        return;
+      }
+      state.termView?.send?.(TERM_KEYS[key] ?? '');
+      focusTerminal();
+    };
+  }
+  $('#btn-term-focus')?.addEventListener('click', () => focusTerminal());
+  // Commands typed by the agent and by the user share one scrollback.
+  window.addEventListener('alphacode:term-focus', () => focusTerminal());
 }
 
 function prompt() {
@@ -1657,6 +1934,8 @@ async function ensurePython() {
 
 /* ----------------------------------------------------------------- views --- */
 
+let paneSync = false;
+
 function setView(view) {
   state.view = view;
   $$('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${view}`));
@@ -1666,6 +1945,17 @@ function setView(view) {
   if (view === 'db') renderDbs();
   if (view === 'deploy') renderDeployments();
   closeDrawer();
+  // On a phone the view and the bottom bar are the same idea; never let them
+  // disagree. `chat` maps to whichever of chat/preview the person is watching,
+  // so it is not forced back — that would undo a tap on Preview.
+  if (!paneSync) {
+    const pane = view === 'files' ? 'files' : view === 'terminal' ? 'terminal' : null;
+    if (pane && pane !== $('#app')?.dataset.mobilePane) {
+      paneSync = true;
+      setMobilePane(pane);
+      paneSync = false;
+    }
+  }
 }
 
 const MODE_INFO = {
@@ -1843,7 +2133,8 @@ function autoGrow() {
 function syncSendState() {
   const button = $('#btn-send');
   const prompt = $('#prompt');
-  if (button) button.disabled = state.running || !prompt?.value.trim();
+  const hasAttachments = Boolean(state.attachments?.length);
+  if (button) button.disabled = state.running || !(prompt?.value.trim() || hasAttachments);
 }
 
 const MODES = ['default', 'accept-edits', 'plan', 'bypass'];
@@ -1990,17 +2281,17 @@ function wireGlobal() {
   };
   $('#btn-export').onclick = exportProject;
   $('#btn-preview').onclick = () => doDeploy('preview');
-  $('#btn-refresh-files').onclick = refreshFiles;
-  $('#btn-save-file').onclick = saveFile;
-  $('#editor').addEventListener('input', () => {
-    state.editorDirty = true;
-  });
-  $('#editor').addEventListener('keydown', (e) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === 's') {
-      e.preventDefault();
-      saveFile();
-    }
-  });
+  $('#btn-refresh-files').onclick = () => refreshFiles();
+  $('#btn-attach').onclick = () => pickAttachment();
+  $('#activity-head').onclick = () => {
+    markToggled();
+    const panel = $('#activity-panel');
+    const collapsed = panel.classList.toggle('collapsed');
+    $('#activity-head').setAttribute('aria-expanded', String(!collapsed));
+    if (!collapsed) $('#activity-scroll').scrollTop = $('#activity-scroll').scrollHeight;
+  };
+  bindTermKeys();
+  bindTerminalResize();
   $('#btn-mode').onclick = () => {
     state.mode = MODES[(MODES.indexOf(state.mode) + 1) % MODES.length];
     state.store.saveSettings({ mode: state.mode });
@@ -2020,7 +2311,7 @@ function wireGlobal() {
   $$('[data-deploy]').forEach((b) => (b.onclick = () => deployToProvider(b.dataset.deploy)));
 
   window.addEventListener('beforeunload', (e) => {
-    if (state.running || state.editorDirty) {
+    if (state.running) {
       e.preventDefault();
       e.returnValue = '';
     }

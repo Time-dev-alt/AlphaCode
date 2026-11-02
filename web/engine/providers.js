@@ -357,12 +357,15 @@ export async function demoCompletion({ messages = [], tools = [], onEvent = () =
 
   if (step < plan.length && tools.some((t) => t.function?.name === plan[step].name)) {
     const call = { id: `call_demo_${step}`, name: plan[step].name, arguments: JSON.stringify(plan[step].args) };
-    say(`Step ${step + 1}: ${call.name}`);
+    // No narration per step: the activity timeline already reports what is
+    // happening, and repeating it as prose splits the answer into fragments.
     onEvent({ type: 'tool_call', call });
-    return { content: `Step ${step + 1}: ${call.name}`, reasoning: '', toolCalls: [call], usage: { input: 120, output: 60 }, finishReason: 'tool_calls', model };
+    // No prose between tool calls: this content is persisted and replayed as an
+    // assistant message, so a label here would fragment the saved transcript.
+    return { content: '', reasoning: '', toolCalls: [call], usage: { input: 120, output: 60 }, finishReason: 'tool_calls', model };
   }
 
-  const text = `Built a landing page for: **${String(last).slice(0, 120)}**\n\n- \`index.html\` — hero, feature grid, footer\n- \`style.css\` — dark theme, responsive\n\nThis is the offline demo model. Add a key under Settings → Providers to use a real one.`;
+  const text = `Here is a landing page you can push around.\n\n- \`index.html\` — hero, three beans, a three-step section and a pricing block\n- \`style.css\` — dark palette, one accent, responsive down to a phone\n\nSay what to change — “make the hero bigger”, “add a testimonial”, “try a light theme” — or open **Files** to edit it yourself.\n\n_This is the offline demo model. Add a provider key under Settings → Providers for a real one._`;
   for (const chunk of text.match(/[\s\S]{1,24}/g) || []) {
     say(chunk);
     await new Promise((r) => setTimeout(r, 8));

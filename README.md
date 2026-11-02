@@ -15,9 +15,30 @@ click any element in the preview and the composer fills in "in `.hero h1`, chang
 Runtime errors collect in a drawer with one button — *Fix with AI* — and every turn
 is checkpointed so you can rewind.
 
-**Code** is the same project with the IDE in front: file tree and editor, a real
-terminal (`node`, `npm install`, `python`, `sqlite3`, `cmd &`), the SQLite browser,
-and the preview narrowed to a column.
+**Code** is the same project with the IDE in front: a file tree you can operate, an
+editor with tabs and a real undo, a real terminal (`node`, `npm install`, `python`,
+`sqlite3`, `cmd &`), the SQLite browser, and the preview narrowed to a column.
+
+The workspace is yours to work in, not a viewer:
+
+- **Edit** any text file with line numbers, `⌘S` to save, autosave half a second after
+  you stop typing, and a tab strip that marks unsaved changes with a dot. If the agent
+  rewrites a file you have open, the editor reloads it — unless you are mid-edit.
+- **Add files** with *New*, by dropping them anywhere on the window (folders keep their
+  paths), by uploading, or by unpacking a `.zip`. Binary files download instead of
+  opening in the editor.
+- **Import a repo** with `owner/repo`. Public repositories need no account; connect
+  GitHub and private ones work too. Lockfiles, `node_modules` and build output are
+  skipped, and a single wrapping folder is stripped so `index.html` lands where the
+  preview expects it.
+- **Export** any file, or the whole project as a `.zip`, from the folder menu or the
+  toolbar. Right-click a file for rename, duplicate, download and delete.
+
+Above the conversation, **the agent's activity** is a live log of what it is actually
+doing — thinking, reading, writing, running a command — with per-step state, elapsed
+time and the output of each step behind a tap. It streams while a run is in progress
+and folds to a single line when it finishes, so the answer gets the room. Router
+failover is a footnote, not a wall of red.
 
 Both share one design system: one warm accent (`#ffb02e`) against near-black, Geist
 for UI text, Geist Mono for anything a machine produced, Instrument Serif italic for

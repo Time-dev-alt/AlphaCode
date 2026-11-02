@@ -45,7 +45,7 @@ Evidence: `web/engine/agent/governor.js`, `web/engine/agent/prompt.js`,
 
 | # | Lovable capability | AlphaCode | Score | Where |
 |---|---|---|---:|---|
-| 1 | Prompt → complete app in one turn | Yes. Multi-file, batched into one response; prompt demands real copy, styling and responsiveness, not placeholders. `write_many` makes a multi-file change one round trip, and `scaffold` starts from a finished app instead of a blank page | 95 % | `agent/prompt.js`, `engine/tools.js`, `agent/scaffolds.js` |
+| 1 | Prompt → complete app in one turn | Yes. Multi-file, batched into one response; `write_many` makes a multi-file change one round trip, and `scaffold` starts from a finished app instead of a blank page. Still one notch below a purpose-built app builder: no framework or component library, so a complex SPA is more work for the model | 95 % | `agent/prompt.js`, `engine/tools.js`, `agent/scaffolds.js` |
 | 2 | Live preview that reloads as files land | Yes. `<iframe srcdoc>` bundles the project from OPFS; reloads on file change, debounced | 100 % | `web/app/workspace.js` `refreshPreview` |
 | 3 | Select element in preview → targeted edit | Yes. Picker sends selector, tag, text, size and HTML back to the composer | 100 % | `workspace.js` `injectHarness` / `onPreviewMessage` |
 | 4 | *Visual edits*: adjust the picked element without writing a prompt | Yes — text / colour / spacing / text size / hide / delete, each turned into one precise single-file instruction | 90 % | `web/engine/agent/visual.js`, `renderVisualEdit` |
@@ -62,10 +62,14 @@ Evidence: `web/engine/agent/governor.js`, `web/engine/agent/prompt.js`,
 | 15 | Team collaboration / comments | No accounts, therefore no presence. Export/import and GitHub pull requests are the handoff | 0 % | — |
 | 16 | Credits and usage transparency | Yes, and cheaper: a per-turn request meter, per-call token counts, and `/cost` | 100 % | `#req-pill`, `Harness.usage`, `/cost` |
 
-**Lovable-weighted: ≈ 82 %.** The gap is entirely in the managed-backend rows
-(Supabase auth/realtime, custom domains, collaboration) — things that need a
-server we deliberately do not have — plus Figma import and true two-way GitHub
-sync.
+**Lovable: ≈ 77 %** — the plain mean of the sixteen rows above (76.9). The gap is
+entirely in the managed-backend rows (Supabase auth/realtime, custom domains,
+collaboration) — things that need a server we deliberately do not have — plus
+Figma import and true two-way GitHub sync.
+
+Earlier revisions quoted a hand-picked weighting instead, which is not
+reproducible and flattered the result. This is an unweighted mean so anybody can
+recompute it from the table.
 
 ---
 
@@ -85,7 +89,8 @@ sync.
 | 10 | Attachments / multimodal input | Partial: images and text files; no audio/video understanding | 60 % | `pickAttachment` |
 | 11 | Tool breadth (browser, search, MCP) | Yes: `web_fetch`, MCP over Streamable HTTP, hooks, SQLite tools; **no** `web_search` (needs a search endpoint) | 85 % | `tools.js`, `mcp.js` |
 
-**Genspark-weighted: ≈ 85 %.**
+**Genspark: ≈ 87 %** — the plain mean of the eleven rows above (87.3). Same
+method as the Lovable table: unweighted, recomputable from the numbers.
 
 ---
 

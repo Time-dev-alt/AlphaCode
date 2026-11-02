@@ -1,6 +1,6 @@
 {
   "name": "alphacode",
-  "version": "7.0.0",
+  "version": "8.0.0",
   "private": true,
   "type": "module",
   "description": "AlphaCode — an AI app builder and coding agent that runs entirely in your browser: real Node + npm, CPython, a shell, SQLite, MCP and deploys, all in the tab.",

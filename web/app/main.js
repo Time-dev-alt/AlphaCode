@@ -12,6 +12,9 @@ import { Shell } from '../engine/shell.js';
 import { openDatabase, saveDatabase, dbFiles, loadEngine } from '../engine/db.js';
 import { createPreview, connectGitHub, deployProject, whoAmI, publishToGitHub, importUrl, DEPLOY_TARGETS } from '../engine/deploy.js';
 import { Harness, Run } from '../engine/harness.js';
+import { canVerify, verifyDecision, verificationPrompt, keyOf, verifySummary } from '../engine/agent/verify.js';
+import { getGovernor } from '../engine/agent/governor.js';
+import { toModelMessages } from '../engine/agent/history.js';
 import { FREE_MODELS, PROVIDERS, GUEST_MODEL } from '../engine/providers.js';
 import { runPython, pipInstall, loadPython, pythonReady } from '../engine/python.js';
 import { createNodeSession } from '../engine/node/session.js';
@@ -20,7 +23,7 @@ import { JobManager } from '../engine/jobs.js';
 import { loadHooks } from '../engine/hooks.js';
 import { runWasi, compileC, canCompileC, RUNTIME_MATRIX } from '../engine/native.js';
 import { connectAll, contentToText } from '../engine/mcp.js';
-import { mountWorkspace, refreshPreview, renderJobs, renderHistory, setLayout, setMobilePane, pickAttachment, setPromptValue } from './workspace.js';
+import { mountWorkspace, refreshPreview, renderJobs, renderHistory, setLayout, setMobilePane, pickAttachment, setPromptValue, previewErrors, clearPreviewErrors, waitForPreviewReport, clearVisualEdit } from './workspace.js';
 import { zipSync, download } from '../engine/zip.js';
 import { TerminalView } from '../../public/assets/term.js';
 import {
@@ -152,6 +155,35 @@ async function startFromTemplate(template) {
 /* --------------------------------------------------------------- theme --- */
 
 const THEME_KEY = 'alphacode-theme';
+const GOVERNOR_KEY = 'alphacode-governor';
+
+/**
+ * Remember provider cooldowns across reloads.
+ *
+ * Reloading the page does not un-rate-limit a provider, so pretending it does
+ * just means burning a request to find out. Only the cooldowns are stored —
+ * never key material.
+ */
+function restoreGovernor() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(GOVERNOR_KEY) || 'null');
+    if (!saved) return;
+    getGovernor().restore(saved);
+  } catch {
+    /* a corrupt entry should never stop the app from booting */
+  }
+}
+
+function persistGovernor() {
+  try {
+    const governor = getGovernor();
+    governor.budget = Number(state.settings?.requestBudget) || governor.budget;
+    localStorage.setItem(GOVERNOR_KEY, JSON.stringify(governor.serialize()));
+    state.requestPressure = governor.snapshot();
+  } catch {
+    /* storage is a nicety here */
+  }
+}
 
 function currentTheme() {
   return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
@@ -413,6 +445,7 @@ async function boot() {
   state.mode = state.settings.mode || 'accept-edits';
   state.model = state.settings.model || GUEST_MODEL;
   state.github = state.settings.github || null;
+  restoreGovernor();
 
   wireGlobal();
   // These two own the file tree and the activity panel; opening a project
@@ -474,6 +507,11 @@ async function boot() {
     focusTerminal: () => focusTerminal(),
     renderAttachments: () => renderAttachments(),
     onSend: () => $('#btn-send').click(),
+    onVisualEdit: (active) => {
+      // The composer gains a purpose of its own while an element is selected.
+      setStatus(active ? 'element selected — adjust it or describe the change' : 'ready');
+      $('#composer')?.classList.toggle('editing-element', Boolean(active));
+    },
     onPublish: () => {
       setView('deploy');
       $('#modal').hidden = true;
@@ -1030,6 +1068,43 @@ function appendNotice(text, kind = 'info') {
   scrollTranscript();
 }
 
+/**
+ * How many model requests this turn has spent.
+ *
+ * Shown because it is the number that decides whether the agent finishes or
+ * gets rate limited — and because seeing "3" instead of nothing is how a user
+ * learns that a batched build really was one round trip.
+ */
+function renderRequestMeter() {
+  const pill = $('#req-pill');
+  if (!pill) return;
+  const used = state.requestsUsed || 0;
+  const budget = state.requestBudget || 0;
+  pill.hidden = !used;
+  const meter = $('#req-meter');
+  if (meter) meter.textContent = budget ? `${used}/${budget}` : `${used}`;
+  pill.title = budget
+    ? `${used} of ${budget} model requests used in this turn`
+    : `${used} model requests used in this turn`;
+  pill.classList.toggle('hot', Boolean(budget) && used >= budget);
+}
+
+/** A notice with one button, for "there is something you can do about this". */
+function appendActionNotice(text, label, onClick, kind = 'warn') {
+  const row = el('div', { class: `notice ${kind}` });
+  const copy = el('span', { text: String(text) });
+  const button = el('button', { class: 'btn sm', text: label });
+  button.onclick = () => {
+    button.disabled = true;
+    button.textContent = '…';
+    onClick();
+  };
+  row.append(copy, button);
+  transInner().append(row);
+  scrollTranscript();
+  return row;
+}
+
 function appendPermission(request) {
   const turn = state.turn || state.lastTurn;
   const host = turn?.tools || transInner();
@@ -1053,7 +1128,14 @@ function appendPermission(request) {
 
 /* ------------------------------------------------------------------- run --- */
 
-async function send(text) {
+/**
+ * Run one turn.
+ *
+ * @param {string} text
+ * @param {{verify?: boolean}} [options]  `verify:false` is used by the
+ *   self-verification pass so a fix turn never triggers another fix turn.
+ */
+async function send(text, options = {}) {
   if (!text?.trim() || state.running) return;
   if (await handleSlash(text.trim())) return;
   if (!state.project) await createProject('My first app', { silent: true });
@@ -1067,9 +1149,11 @@ async function send(text) {
   setPromptValue('');
   autoGrow();
   syncSendState();
+  clearVisualEdit();
   resetActivity();
   activityStarted();
   state.activityProviderErrors = [];
+  state.verifiedThisTurn = false;
   pushActivity({ kind: 'think', title: 'Reading the request', state: 'run' });
   setRunning(true);
   if (isMobile()) setMobilePane('chat');
@@ -1077,6 +1161,10 @@ async function send(text) {
   const run = new Run({ id: uid('run_', 5), threadId: state.thread.id, projectId: state.project.id, mode: state.mode, model: state.model });
   state.run = run;
   state.currentTurn = null;
+  // The thread is the project's memory: replay the recent turns so a follow-up
+  // ("make the hero bigger") has the hero it refers to. Without this the agent
+  // re-planned every turn and sometimes rebuilt files that already existed.
+  const prior = await state.store.messages(state.thread.id).catch(() => []);
   const harness = new Harness({
     store: state.store,
     fs: state.fs,
@@ -1120,12 +1208,18 @@ async function send(text) {
       return files;
     },
   });
+  harness.messages = toModelMessages(prior);
+  // One governor for the page: a cooldown learned in this turn still applies in
+  // the next one, so the agent does not re-discover a rate limit by trying.
+  harness.governor = getGovernor();
   state.harness = harness;
+  state.verifySeen = state.verifySeen || new Set();
+  let result = null;
 
   run.onEvent(handleEvent);
   run.status = 'running';
   try {
-    const result = await harness.send(outgoing);
+    result = await harness.send(outgoing);
     run.emit({ type: 'done', finishReason: result.finishReason, steps: harness.usage.calls, usage: harness.usage, filesChanged: [...harness.filesChanged] });
   } catch (err) {
     if (err?.name !== 'AbortError') run.emit({ type: 'error', message: err.message });
@@ -1139,6 +1233,69 @@ async function send(text) {
     await renderSessions();
     await renderDeployments();
     if (state.view === 'db') await renderDbs();
+    persistGovernor();
+    // Self-verification runs after the turn is closed, so a fix pass looks like
+    // a normal follow-up turn rather than a second half of this one.
+    if (result && options.verify !== false) queueVerification(harness, result);
+  }
+}
+
+/**
+ * Give the preview a moment, then fix whatever it is shouting about.
+ *
+ * Lovable and Genspark both do this and it is most of why their output feels
+ * finished. It is capped at one pass per user turn and two requests, because an
+ * agent that "fixes" a broken preview forever is worse than one that says what
+ * is wrong.
+ */
+async function queueVerification(harness, result) {
+  if (state.verifyQueued) return;
+  state.verifyQueued = true;
+  const errors = [];
+  const decide = () =>
+    verifyDecision({
+      finishReason: result.finishReason,
+      errors,
+      filesChanged: harness.filesChanged.size > 0,
+      budgetLeft: harness.governor ? harness.governor.remaining : 0,
+      verifyAlready: Boolean(state.verifiedThisTurn),
+      seen: state.verifySeen,
+      enabled: state.settings.autoVerify !== false,
+    });
+  try {
+    state.verifySeen = state.verifySeen || new Set();
+    // Nothing to wait for if the turn was stopped, changed nothing, or is out
+    // of requests — check before spending 1.6 s on a preview that cannot help.
+    if (
+      !canVerify({
+        finishReason: result.finishReason,
+        filesChanged: harness.filesChanged.size > 0,
+        budgetLeft: harness.governor ? harness.governor.remaining : 0,
+        verifyAlready: Boolean(state.verifiedThisTurn),
+        enabled: state.settings.autoVerify !== false,
+      })
+    ) {
+      return;
+    }
+
+    await waitForPreviewReport({ ms: 1600 });
+    errors.push(...previewErrors());
+    const decision = decide();
+    if (!decision.go) {
+      if (errors.length && decision.reason === 'already reported') clearPreviewErrors();
+      return;
+    }
+    state.verifiedThisTurn = true;
+    for (const error of decision.errors) state.verifySeen.add(keyOf(error));
+    noteActivity(verifySummary(decision.errors), 'checking the preview');
+    appendNotice(verifySummary(decision.errors), 'info');
+    clearPreviewErrors();
+    state.verifyQueued = false;
+    await send(verificationPrompt(decision.errors, { where: 'preview' }), { verify: false });
+  } catch (err) {
+    console.warn('[verify] skipped', err);
+  } finally {
+    state.verifyQueued = false;
   }
 }
 
@@ -1146,10 +1303,31 @@ function handleEvent(ev) {
   switch (ev.type) {
     case 'model': {
       $('#chip-model-txt').textContent = `${ev.model.split('/').pop()}`;
-      setStatus(`calling ${ev.label || ev.provider}…`);
+      const counter = ev.request && ev.remaining != null ? ` · request ${ev.request}, ${ev.remaining} left` : '';
+      if (ev.request != null) {
+        state.requestsUsed = ev.request;
+        renderRequestMeter();
+      }
+      setStatus(`calling ${ev.label || ev.provider}${counter}`);
       // A turn can call the model many times: keep one row and retitle it rather
       // than printing a line per round.
-      setThought(`Thinking via ${ev.label || ev.provider}`);
+      setThought(`Thinking via ${ev.label || ev.provider}${counter}`);
+      break;
+    }
+    case 'budget': {
+      state.requestBudget = ev.budget;
+      state.requestsUsed = 0;
+      renderRequestMeter();
+      break;
+    }
+    case 'rate_wait': {
+      setStatus(`rate limit — waiting ${Math.ceil(ev.ms / 1000)}s before the next request`);
+      pushActivity({ kind: 'think', title: `Waiting out a rate limit (${Math.ceil(ev.ms / 1000)}s)`, state: 'run' });
+      break;
+    }
+    case 'provider_skip': {
+      // Deliberately quiet: this is the governor working, not a failure.
+      setStatus(`waiting — ${ev.reason}`);
       break;
     }
     case 'text':
@@ -1238,7 +1416,13 @@ function handleEvent(ev) {
       // three stack traces to someone who just typed "build me a shop" is noise,
       // so they are buffered into one line once the turn actually produces output.
       state.providerErrors = state.providerErrors || [];
-      state.providerErrors.push({ provider: PROVIDERS[ev.provider]?.label || ev.provider, message: ev.message });
+      state.providerErrors.push({
+        provider: PROVIDERS[ev.provider]?.label || ev.provider,
+        message: ev.message,
+        kind: ev.kind || 'unknown',
+        cooldownMs: ev.cooldownMs || 0,
+        retryable: ev.retryable !== false,
+      });
       break;
     }
     case 'usage': {
@@ -1271,7 +1455,8 @@ function handleEvent(ev) {
         if (!turn.hasReasoning) turn.reasoning.remove();
         const stats = el('div', { class: 'turn-stats' });
         const u = ev.usage || {};
-        stats.textContent = `${ev.steps || 0} model calls · ${(u.input || 0).toLocaleString()} in / ${(u.output || 0).toLocaleString()} out${ev.filesChanged?.length ? ` · ${ev.filesChanged.length} files touched` : ''}${ev.finishReason === 'stopped' ? ' · stopped' : ''}`;
+        const calls = ev.steps || 0;
+        stats.textContent = `${calls} model request${calls === 1 ? '' : 's'} · ${(u.input || 0).toLocaleString()} in / ${(u.output || 0).toLocaleString()} out${ev.filesChanged?.length ? ` · ${ev.filesChanged.length} files touched` : ''}${ev.finishReason === 'stopped' ? ' · stopped' : ''}${ev.finishReason === 'budget' ? ' · paused' : ''}`;
         turn.wrap.append(stats);
         turn.meta.querySelector('.dot')?.classList.remove('live');
       }
@@ -1296,6 +1481,10 @@ function handleEvent(ev) {
       refreshPreview({ force: Boolean(ev.filesChanged?.length) });
       break;
     }
+    case 'budget_exhausted':
+      appendActionNotice(ev.message, 'Continue', () => send('continue'), 'warn');
+      noteActivity('Paused to stay inside the rate limit', `used ${ev.budget} requests this turn`);
+      break;
     case 'error':
       appendNotice(ev.message, 'err');
       pushActivity({ kind: 'error', title: ev.message, state: 'error' });
@@ -1317,14 +1506,27 @@ function flushProviderErrors() {
   if (!errors.length) return;
   const demo = state.settings.demo !== false;
   const names = [...new Set(errors.map((e) => e.provider))];
+
+  // The governor tells us *why* a provider failed, so the message can be about
+  // the user's situation ("out of credit") instead of a stack trace.
+  const kinds = new Set(errors.map((e) => e.kind || 'unknown'));
+  const advice = (() => {
+    if (kinds.has('auth')) return 'That key was rejected — check it in Settings → Model access.';
+    if (kinds.has('quota')) return 'That account is out of credit — add another key in Settings → Model access.';
+    if (kinds.has('rate_limit')) {
+      const wait = Math.max(...errors.map((e) => e.cooldownMs || 0));
+      return `It was rate limited${wait ? ` and is paused for ${Math.ceil(wait / 1000)}s` : ''}${demo ? ' — the offline demo model answered instead.' : '.'}`;
+    }
+    if (kinds.has('network')) return 'It could not be reached from this browser — usually a CORS block, not your code.';
+    if (kinds.has('model')) return 'That model is not available on this account — pick another in Settings → Model access.';
+    return demo ? 'The offline demo model answered instead.' : 'Try again, or add another key in Settings → Model access.';
+  })();
+
   if (errors.length === 1) {
-    appendNotice(`${names[0]} could not be reached — ${demo ? 'the offline demo model answered instead. Add your own key in Settings → Model access.' : 'check your key in Settings → Model access.'}`, 'warn');
+    appendNotice(`${names[0]}: ${advice}`, 'warn');
     return;
   }
-  appendNotice(
-    `${names.length} free routers were unreachable from this browser (a network or CORS block — not your code). ${demo ? 'The offline demo model answered instead.' : ''} Add a provider key in Settings → Model access for real models.`,
-    'warn',
-  );
+  appendNotice(`${names.join(', ')} — ${advice}`, 'warn');
 }
 
 const onTextFlush = debounce(() => {
@@ -1798,6 +2000,13 @@ function openSettings() {
         </select>
       </div>
       <label class="check"><input type="checkbox" id="set-demo" ${state.settings.demo !== false ? 'checked' : ''}> use the offline demo model when no key works</label>
+      <div class="field"><label>Requests per turn</label>
+        <select id="set-budget">
+          ${[4, 6, 8, 12, 16].map((n) => `<option value="${n}" ${(Number(state.settings.requestBudget) || 8) === n ? 'selected' : ''}>${n} request${n === 1 ? '' : 's'}</option>`).join('')}
+        </select>
+        <div class="hint">How many times the agent may call the model before it pauses. Fewer requests is the single best way to stay inside a free tier — 8 finishes most tasks, and a paused turn continues with one click.</div>
+      </div>
+      <label class="check"><input type="checkbox" id="set-autoverify" ${state.settings.autoVerify !== false ? 'checked' : ''}> fix preview errors automatically after a change</label>
       <div class="fields">${rows}</div>
     </section>
     <section>
@@ -2016,6 +2225,22 @@ function openSettings() {
   $('#set-demo').onchange = async (e) => {
     state.settings = await state.store.saveSettings({ demo: e.target.checked });
   };
+  const budgetSelect = $('#set-budget');
+  if (budgetSelect) {
+    budgetSelect.onchange = async () => {
+      const value = Number(budgetSelect.value) || 8;
+      state.settings = await state.store.saveSettings({ requestBudget: value });
+      const governor = getGovernor();
+      governor.budget = value;
+      toast(`Up to ${value} model requests per turn`, 'info', 2600);
+    };
+  }
+  const verifyToggle = $('#set-autoverify');
+  if (verifyToggle) {
+    verifyToggle.onchange = async () => {
+      state.settings = await state.store.saveSettings({ autoVerify: verifyToggle.checked });
+    };
+  }
   let saveTimer;
   body.querySelectorAll('[data-key],[data-model]').forEach((input) => {
     input.oninput = () => {

@@ -16,11 +16,14 @@ export const PROVIDERS = {
   kilo: {
     id: 'kilo',
     label: 'Kilo (free)',
+    // The gateway is OpenRouter-shaped: one key, hundreds of models, and the
+    // `:free` pool answers with no key at all (200 requests/hour per IP).
     baseUrl: 'https://api.kilo.ai/api/gateway',
     keyless: true,
     freeOnly: true,
     docs: 'https://kilo.ai',
-    note: 'Anonymous free router — no account, no key.',
+    note: 'Anonymous free router — no account, no key. Default for AlphaCode.',
+    relay: 'kilo',
   },
   opencode: {
     id: 'opencode',
@@ -30,6 +33,7 @@ export const PROVIDERS = {
     freeOnly: true,
     docs: 'https://opencode.ai/docs/zen',
     note: 'Free models accept an anonymous key; paid models need your own.',
+    relay: 'opencode',
   },
   openrouter: {
     id: 'openrouter',
@@ -98,6 +102,7 @@ export const PLATFORM_CHAIN = ['kilo', 'opencode'];
  * Order: explicit BYOK → platform free routers (kilo/opencode) → demo.
  */
 import { readRetryAfter } from './agent/governor.js';
+import { attemptModels, FALLBACK_CATALOG } from './agent/catalog.js';
 
 export function planAttempts({ model = '', settings = {} } = {}) {
   const keys = settings.keys || {};
@@ -109,9 +114,17 @@ export function planAttempts({ model = '', settings = {} } = {}) {
   const freeModel = model || GUEST_MODEL;
   for (const provider of PLATFORM_CHAIN) {
     if (provider === 'openrouter' && !keys.openrouter?.key && !settings.platformOpenrouter) continue;
+    // A free router answers with whatever model it likes only if you ask for the
+    // router; a specific model can be retired between two page loads. So each
+    // router carries a ranked list: the router first, then the best catalog
+    // entries, and the loop walks it when a model is refused.
+    const preferred = modelForProvider(provider, freeModel);
+    const live = settings.catalog?.[provider] || [];
+    const ranked = attemptModels(provider, { live, preferred, limit: 2, pool: settings.modelPool });
     attempts.push({
       provider,
-      model: modelForProvider(provider, freeModel),
+      model: preferred,
+      models: ranked.map((m) => m.id),
       via: provider === 'kilo' ? 'guest' : 'platform',
       key: keys[provider]?.key || (provider === 'opencode' ? 'public' : ''),
     });
@@ -122,7 +135,7 @@ export function planAttempts({ model = '', settings = {} } = {}) {
 }
 
 export function modelForProvider(provider, model) {
-  const list = FREE_MODELS[provider] || [];
+  const list = FREE_MODELS[provider] || FALLBACK_CATALOG[provider] || [];
   if (list.some((m) => m.id === model)) return model;
   if (provider === 'kilo') return 'kilo-auto/free';
   if (provider === 'opencode') return 'big-pickle';
@@ -190,6 +203,29 @@ function safeJson(text) {
 }
 
 /** Parse an SSE stream of OpenAI-style chunks (also used for Anthropic events). */
+/**
+ * Where a keyless request may be relayed from.
+ *
+ * Some devices cannot reach a provider directly: an origin-locked API, a
+ * privacy browser that strips the `Origin` header, a captive network, a
+ * corporate proxy that blocks unknown hosts. The symptom is identical to a
+ * broken key — which is exactly the "works on my machine, not on my phone"
+ * report. A same-origin relay on the user's *own* deployment fixes it without
+ * changing the security model, because:
+ *
+ *   • it is only used for **keyless** free routers, and
+ *   • the function refuses any request that carries credentials, so a BYOK key
+ *     can never travel through it.
+ */
+export function relayUrlFor(provider, path = '/chat/completions') {
+  const meta = PROVIDERS[provider];
+  if (!meta?.relay) return '';
+  return `/api/llm/${meta.relay}${path}`;
+}
+
+/** Response bodies that mean "this transport is blocked", not "your key is bad". */
+const TRANSPORT_STATUS = new Set([0, 403, 405, 407, 421]);
+
 async function readSse(response, onChunk) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -228,6 +264,7 @@ export async function streamChat({
   baseUrl = '',
   maxTokens = 8192,
   signal,
+  relay = true,
   onEvent = () => {},
   fetchImpl = (...a) => fetch(...a),
 } = {}) {
@@ -252,25 +289,57 @@ export async function streamChat({
         stream_options: { include_usage: true },
       };
 
-  let res;
-  try {
-    res = await fetchImpl(url, {
+  const send = (target, targetHeaders) =>
+    fetchImpl(target, {
       method: 'POST',
-      headers: headersFor(provider, key),
+      headers: targetHeaders,
       body: JSON.stringify(body),
       signal,
+      // No cookies: the relay and the providers both work better stateless, and
+      // sending credentials cross-origin would force a preflight that some
+      // devices answer badly.
+      credentials: 'omit',
     });
+
+  const directHeaders = headersFor(provider, key);
+  // A relayed request must not look like it carries a key, or the function
+  // rejects it — that is the whole guarantee. `public` is OpenCode Zen's shared
+  // anonymous key, not the user's: the relay adds its own copy server-side, so
+  // the request crossing the origin carries nothing personal either way.
+  const anonymous = !key || (provider === 'opencode' && key === 'public');
+  const relayTarget = anonymous && relay !== false ? relayUrlFor(provider) : '';
+  const relayHeaders = { 'Content-Type': 'application/json', 'X-AlphaCode-Relay': '1' };
+
+  let res;
+  let viaRelay = false;
+  try {
+    res = await send(url, directHeaders);
   } catch (err) {
     if (err?.name === 'AbortError') throw err;
-    const failure = new Error(
-      `${meta.label} is unreachable from this browser (${err.message || 'network error'}). ` +
-        `If you expected this to work, the provider is probably blocking cross-origin requests — use a BYOK provider that allows CORS, or proxy it yourself.`,
-    );
-    failure.status = 0;
-    failure.provider = provider;
-    failure.network = true;
-    throw failure;
+    if (!relayTarget) throw networkFailure(meta, provider, err);
+    // Direct fetch failed at the transport level: retry through our own origin.
+    try {
+      res = await send(relayTarget, relayHeaders);
+      viaRelay = true;
+    } catch {
+      throw networkFailure(meta, provider, err);
+    }
   }
+
+  // A 403/405 from the edge is usually "this origin is not allowed", which the
+  // relay can answer. Only try it once, and only for credential-free requests.
+  if (relayTarget && !viaRelay && TRANSPORT_STATUS.has(res.status)) {
+    try {
+      const relayed = await send(relayTarget, relayHeaders);
+      if (relayed.ok || !TRANSPORT_STATUS.has(relayed.status)) {
+        res = relayed;
+        viaRelay = true;
+      }
+    } catch {
+      /* keep the original response — its status is more informative */
+    }
+  }
+  if (viaRelay) onEvent({ type: 'relay', provider });
 
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -371,6 +440,18 @@ export async function streamChat({
 
   for (const call of acc.toolCalls) onEvent({ type: 'tool_call', call });
   return acc;
+}
+
+function networkFailure(meta, provider, err) {
+  const failure = new Error(
+    `${meta.label} is unreachable from this browser (${err?.message || 'network error'}). ` +
+      `The provider is blocking cross-origin requests, or the network is filtering it. ` +
+      `AlphaCode already tried its own relay — deploy the app with Pages Functions to keep that path available.`,
+  );
+  failure.status = 0;
+  failure.provider = provider;
+  failure.network = true;
+  return failure;
 }
 
 /** Deterministic offline model so the harness is demoable without any network. */

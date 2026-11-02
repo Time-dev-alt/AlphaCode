@@ -182,6 +182,11 @@ export class RequestGovernor {
     this.maxCooldownMs = maxCooldownMs;
     this.used = 0;
     this.health = new Map(); // provider -> { until, failures, hits: number[], lastOk, reason }
+    // Model-level health, keyed `provider::model`. A model that has been retired
+    // (`404 model not found`) must not take the whole provider down with it —
+    // that is what used to happen, and it is why a working router could look
+    // broken on one machine and fine on another.
+    this.models = new Map(); // key -> { until, reason }
     this.sticky = '';
     this.stats = { attempts: 0, skippedCooldown: 0, waitedMs: 0, failovers: 0 };
   }
@@ -264,6 +269,41 @@ export class RequestGovernor {
     if (this.sticky === provider) this.sticky = '';
     this.stats.failovers += 1;
     return wait;
+  }
+
+  /** ms until a specific model is worth trying again. */
+  modelCooldown(provider, model) {
+    const row = this.models.get(`${provider}::${model}`);
+    return row ? Math.max(0, row.until - this.now()) : 0;
+  }
+
+  modelAvailable(provider, model) {
+    return this.modelCooldown(provider, model) === 0;
+  }
+
+  /**
+   * Park one model. Long for "this model no longer exists", short for a
+   * transient server error, never for a rate limit (that is the provider's).
+   */
+  penalizeModel(provider, model, classification = {}) {
+    if (!model) return 0;
+    const kind = classification.kind || 'unknown';
+    const wait =
+      kind === 'model' || kind === 'auth' || kind === 'quota'
+        ? 30 * 60_000
+        : kind === 'rate_limit'
+          ? 0
+          : jitter(60_000);
+    if (!wait) return 0;
+    this.models.set(`${provider}::${model}`, { until: this.now() + Math.min(wait, this.maxCooldownMs), reason: kind });
+    return wait;
+  }
+
+  /** Forget model-level cooldowns (used by "try again now"). */
+  resetModels(provider = '') {
+    for (const key of [...this.models.keys()]) {
+      if (!provider || key.startsWith(`${provider}::`)) this.models.delete(key);
+    }
   }
 
   /** The provider answered. Forget its backoff and prefer it next time. */
@@ -367,6 +407,7 @@ export class RequestGovernor {
 
   /** Forget cooldowns (the "try again now" button). */
   reset({ keepBudget = false } = {}) {
+    this.models.clear();
     for (const row of this.health.values()) {
       row.until = 0;
       row.failures = 0;
@@ -383,12 +424,20 @@ export class RequestGovernor {
     for (const [provider, row] of this.health) {
       if (row.until > now) cooldowns[provider] = { until: row.until, failures: row.failures, reason: row.reason };
     }
-    return { cooldowns, sticky: this.sticky, now };
+    const models = {};
+    for (const [key, row] of this.models) {
+      if (row.until > now) models[key] = { until: row.until, reason: row.reason };
+    }
+    return { cooldowns, models, sticky: this.sticky, now };
   }
 
   restore(state = {}) {
     const now = this.now();
     this.sticky = state.sticky || '';
+    for (const [key, row] of Object.entries(state.models || {})) {
+      if (!row || row.until <= now) continue;
+      this.models.set(key, { until: Math.min(row.until, now + this.maxCooldownMs), reason: row.reason || 'model' });
+    }
     for (const [provider, row] of Object.entries(state.cooldowns || {})) {
       if (!row || row.until <= now) continue;
       const entry = this.entry(provider);

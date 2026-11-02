@@ -439,3 +439,31 @@ test('the phone preview pane is in the same grid row as the work column', { skip
   assert.equal(doc.querySelectorAll('#preview-stage').length, 1);
   app.dataset.mobilePane = 'chat';
 });
+
+test('settings opens as readable, sectioned panes with a model picker', { skip }, async () => {
+  const { window } = ctx;
+  const doc = window.document;
+  doc.querySelector('#btn-settings').click();
+  await wait(80);
+
+  const body = doc.querySelector('#modal-body');
+  const tabs = [...body.querySelectorAll('.set-tab')].map((tab) => tab.dataset.tab);
+  assert.deepEqual(tabs, ['appearance', 'models', 'providers', 'runtimes', 'packages', 'mcp', 'hooks', 'data']);
+  assert.equal(body.querySelector('.set-pane.is-active')?.dataset.pane, 'appearance', 'one pane at a time');
+  assert.ok(body.querySelectorAll('.set-pane').length === tabs.length, 'every tab has a pane');
+
+  body.querySelector('.set-tab[data-tab="models"]').click();
+  assert.equal(body.querySelector('.set-pane.is-active')?.dataset.pane, 'models');
+  assert.ok(body.querySelectorAll('#set-model option').length > 3, 'the default-model select is populated');
+  assert.ok(body.querySelectorAll('.model-row').length > 0, 'the picker lists models before any fetch (curated)');
+  assert.ok(body.querySelector('#set-fetch-models'), 'fetch models is wired');
+
+  body.querySelector('.set-tab[data-tab="runtimes"]').click();
+  assert.ok(body.querySelector('#set-wasm'), 'the WASM compiler switch exists');
+  assert.ok(body.querySelector('#set-webcontainer'), 'the WebContainers switch exists');
+  assert.ok(body.querySelector('#wc-state').textContent.length > 10, 'the sandbox explains itself on this device');
+  assert.ok(body.querySelector('#set-cc'), 'the compile endpoint field is still there');
+
+  doc.querySelector('#btn-close-modal').click();
+  assert.equal(doc.querySelector('#modal').hidden, true);
+});

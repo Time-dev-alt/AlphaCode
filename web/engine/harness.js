@@ -272,100 +272,139 @@ export class Harness {
       let retryableSeen = null;
       for (const attempt of ordered) {
         if (this.signal?.aborted) throw new DOMException('stopped', 'AbortError');
-        if (attemptsLeft <= 0) break;
+        if (attemptsLeft <= 0 && attempt.provider !== 'demo') break;
 
         // The offline demo model costs nothing, so it is exempt from the budget.
         const metered = attempt.provider !== 'demo';
         const byok = attempt.via === 'byok';
-        if (metered) {
-          // Tell the UI before a pause, not after: a silent ten-second stall
-          // reads as a freeze.
-          const wait = governor.waitForSlot(attempt.provider, { byok });
-          if (wait > 500) this.emit({ type: 'rate_wait', provider: attempt.provider, ms: wait });
-          const ok = await governor.reserve(attempt.provider, { byok, signal: this.signal }).catch((err) => {
-            if (err?.name === 'AbortError') throw err;
-            return false;
-          });
-          if (!ok) {
-            this.emit({ type: 'provider_skip', provider: attempt.provider, reason: governor.remaining > 0 ? 'waiting for a rate-limit slot' : 'request budget spent' });
-            if (governor.remaining <= 0) break;
-            continue;
-          }
-        }
-        attemptsLeft -= 1;
-        this.emit({
-          type: 'model',
-          provider: attempt.provider,
-          model: attempt.model,
-          via: attempt.via,
-          label: PROVIDERS[attempt.provider]?.label || attempt.provider,
-          request: this.usage.calls + 1,
-          remaining: governor.remaining,
-        });
+        let budgetOut = false;
+        // A free router may refuse one model and serve another perfectly well.
+        // Walking the ranked candidates inside the same provider attempt is what
+        // keeps "works on this phone, not that one" from becoming a provider
+        // change — and it costs nothing unless the first model actually fails.
+        const candidates = [attempt.model, ...(attempt.models || [])]
+          .filter(Boolean)
+          .filter((model, index, all) => all.indexOf(model) === index)
+          .filter((model) => !metered || governor.modelAvailable(attempt.provider, model));
+        const modelList = candidates.length ? candidates : [attempt.model];
 
-        const started = Date.now();
-        try {
-          const result = await streamChat({
-            provider: attempt.provider,
-            model: attempt.model,
-            messages,
-            system,
-            tools: toOpenAITools(tools),
-            key: attempt.key,
-            baseUrl: attempt.baseUrl,
-            signal: this.signal,
-            maxTokens: settings.maxTokens || 8192,
-            onEvent: (ev) => {
-              if (ev.type === 'text') this.emit({ type: 'text', text: ev.text });
-              if (ev.type === 'reasoning') this.emit({ type: 'reasoning', text: ev.text });
-            },
-          });
-          if (metered) governor.reward(attempt.provider);
-          this.provider = attempt.provider;
-          this.detectedModel = attempt.model;
-          this.usage.calls += 1;
-          this.usage.input += result.usage?.input || 0;
-          this.usage.output += result.usage?.output || 0;
-          this.emit({
-            type: 'usage',
-            usage: {
-              ...this.usage,
-              contextWindow: CONTEXT_WINDOW,
-              inputTokens: result.usage?.input || 0,
-              outputTokens: result.usage?.output || 0,
-              durationMs: Date.now() - started,
-              budget: governor.budget,
-              remaining: governor.remaining,
-            },
-            model: attempt.model,
-            provider: attempt.provider,
-            via: attempt.via,
-          });
-          if (result.partial) result.content = `${result.partial}${result.content || ''}`;
-          return { ...result, provider: attempt.provider };
-        } catch (err) {
-          if (err?.name === 'AbortError') throw err;
-          lastError = err;
-          const classification = classifyProviderError(err);
-          if (metered) governor.penalize(attempt.provider, classification, { byok });
-          this.emit({
-            type: 'provider_error',
-            provider: attempt.provider,
-            kind: classification.kind,
-            retryable: classification.retryable,
-            cooldownMs: governor.cooldownFor(attempt.provider),
-            message: err.message,
-          });
-          // A context overflow is not a provider problem — the caller has to
-          // compact and try again, and spending another provider on it would
-          // just overflow there too.
-          if (classification.kind === 'context') {
-            const overflow = new Error(err.message);
-            overflow.contextOverflow = true;
-            throw overflow;
+        for (const model of modelList) {
+          if (this.signal?.aborted) throw new DOMException('stopped', 'AbortError');
+          if (metered) {
+            // Every request — including a retry on a different model — spends
+            // one unit of the budget and one slot of the rate window.
+            const wait = governor.waitForSlot(attempt.provider, { byok });
+            if (wait > 500) this.emit({ type: 'rate_wait', provider: attempt.provider, ms: wait });
+            const ok = await governor.reserve(attempt.provider, { byok, signal: this.signal }).catch((err) => {
+              if (err?.name === 'AbortError') throw err;
+              return false;
+            });
+            if (!ok) {
+              this.emit({ type: 'provider_skip', provider: attempt.provider, reason: governor.remaining > 0 ? 'waiting for a rate-limit slot' : 'request budget spent' });
+              budgetOut = governor.remaining <= 0;
+              break;
+            }
           }
-          if (classification.retryable) retryableSeen = classification;
+          attemptsLeft -= 1;
+          this.emit({
+            type: 'model',
+            provider: attempt.provider,
+            model,
+            via: attempt.via,
+            label: PROVIDERS[attempt.provider]?.label || attempt.provider,
+            request: this.usage.calls + 1,
+            remaining: governor.remaining,
+          });
+
+          const started = Date.now();
+          try {
+            const result = await streamChat({
+              provider: attempt.provider,
+              model,
+              messages,
+              system,
+              tools: toOpenAITools(tools),
+              key: attempt.key,
+              baseUrl: attempt.baseUrl,
+              signal: this.signal,
+              relay: settings.relay !== false,
+              maxTokens: settings.maxTokens || 16_384,
+              onEvent: (ev) => {
+                if (ev.type === 'text') this.emit({ type: 'text', text: ev.text });
+                if (ev.type === 'reasoning') this.emit({ type: 'reasoning', text: ev.text });
+                if (ev.type === 'relay') this.emit({ type: 'relay', provider: attempt.provider });
+              },
+            });
+            if (metered) governor.reward(attempt.provider);
+            this.provider = attempt.provider;
+            this.detectedModel = model;
+            this.usage.calls += 1;
+            this.usage.input += result.usage?.input || 0;
+            this.usage.output += result.usage?.output || 0;
+            this.emit({
+              type: 'usage',
+              usage: {
+                ...this.usage,
+                contextWindow: CONTEXT_WINDOW,
+                inputTokens: result.usage?.input || 0,
+                outputTokens: result.usage?.output || 0,
+                durationMs: Date.now() - started,
+                budget: governor.budget,
+                remaining: governor.remaining,
+              },
+              model,
+              provider: attempt.provider,
+              via: attempt.via,
+            });
+            if (result.partial) result.content = `${result.partial}${result.content || ''}`;
+            return { ...result, provider: attempt.provider, model };
+          } catch (err) {
+            if (err?.name === 'AbortError') throw err;
+            lastError = err;
+            const classification = classifyProviderError(err);
+
+            // A missing model is the model's problem, not the provider's. Park
+            // it for a while and try the next candidate on the same provider.
+            if (classification.kind === 'model') {
+              if (metered) governor.penalizeModel(attempt.provider, model, classification);
+              this.emit({
+                type: 'provider_error',
+                provider: attempt.provider,
+                model,
+                kind: classification.kind,
+                retryable: false,
+                cooldownMs: 0,
+                message: `${model} is not available on ${PROVIDERS[attempt.provider]?.label || attempt.provider} — trying another model.`,
+              });
+              continue;
+            }
+
+            if (metered) governor.penalize(attempt.provider, classification, { byok });
+            this.emit({
+              type: 'provider_error',
+              provider: attempt.provider,
+              model,
+              kind: classification.kind,
+              retryable: classification.retryable,
+              cooldownMs: governor.cooldownFor(attempt.provider),
+              message: err.message,
+            });
+            // A context overflow is not a provider problem — the caller has to
+            // compact and try again, and spending another provider on it would
+            // just overflow there too.
+            if (classification.kind === 'context') {
+              const overflow = new Error(err.message);
+              overflow.contextOverflow = true;
+              throw overflow;
+            }
+            if (classification.retryable) retryableSeen = classification;
+            break;
+          }
         }
+        // The budget is spent, but the offline demo costs nothing: breaking out
+        // of the whole chain here would end a starved turn with a half-written
+        // project even though a free model was still right there.
+        if (budgetOut && !ordered.slice(ordered.indexOf(attempt) + 1).some((a) => a.provider === 'demo')) break;
       }
 
       // One bounded second pass, and only when something was worth retrying

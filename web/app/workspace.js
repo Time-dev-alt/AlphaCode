@@ -135,6 +135,10 @@ const HARNESS = `<script>(function(){
 
 export async function refreshPreview({ force = false } = {}) {
   if (!api.getState?.().project) return;
+  // A WebContainer dev server owns the preview while it is running: it serves a
+  // real http:// URL, and replacing that with a bundled srcdoc would throw away
+  // everything npm just built.
+  if (api.getState?.().containerUrl) return;
   const frame = $('#preview-frame');
   const empty = $('#preview-empty');
   try {

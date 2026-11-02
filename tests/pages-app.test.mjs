@@ -68,6 +68,10 @@ async function boot() {
   const code = fs.readFileSync(path.join(DIST, 'assets', fs.readdirSync(path.join(DIST, 'assets')).find((f) => f.startsWith('app.') && f.endsWith('.js'))), 'utf8');
   window.eval(code);
   await wait(600);
+  // Auto-verification is a real feature but it runs *after* a turn on a timer,
+  // which makes an otherwise sequential suite racy. It is switched on only in
+  // the test that is about it.
+  if (window.__alphacode?.state?.settings) window.__alphacode.state.settings.autoVerify = false;
   return { window, errors, restore: () => (console.error = realError) };
 }
 
@@ -272,3 +276,102 @@ test('project data exports to a real ZIP without a server', { skip }, async () =
 });
 
 after(() => ctx?.restore());
+
+test('the request meter counts model calls per turn', { skip }, async () => {
+  const { window } = ctx;
+  const app = window.__alphacode;
+  const doc = window.document;
+  await app.send('Add a footer to the page');
+  await wait(1200);
+  const pill = doc.querySelector('#req-pill');
+  assert.ok(pill, 'the request pill exists in the composer');
+  assert.equal(pill.hidden, false, 'it appears once a request has been made');
+  assert.match(doc.querySelector('#req-meter').textContent, /^\d+\/\d+$/, 'it reads used/budget');
+  const stats = [...doc.querySelectorAll('.turn-stats')].pop();
+  assert.match(stats.textContent, /model request/, 'turn stats speak in requests, not calls');
+  assert.ok(app.state.harness.usage.calls >= 1 && app.state.harness.usage.calls <= 8, 'inside the per-turn budget');
+});
+
+test('the settings sheet exposes the request budget and self-verification', { skip }, async () => {
+  const { window } = ctx;
+  const doc = window.document;
+  doc.querySelector('#btn-settings').click();
+  await wait(300);
+  const budget = doc.querySelector('#set-budget');
+  assert.ok(budget, 'budget control rendered');
+  assert.deepEqual([...budget.options].map((o) => o.value), ['4', '6', '8', '12', '16']);
+  assert.equal(budget.value, '8', 'defaults to 8 requests per turn');
+  assert.ok(doc.querySelector('#set-autoverify'), 'auto-verify toggle rendered');
+  assert.equal(doc.querySelector('#set-autoverify').checked, true, 'verification is on by default');
+  doc.querySelector('#btn-close-modal').click();
+  await wait(100);
+  assert.equal(doc.querySelector('#modal').hidden, true, 'the sheet closes again');
+});
+
+test('picking an element offers visual edits that become one precise instruction', { skip }, async () => {
+  const { window } = ctx;
+  const doc = window.document;
+  window.dispatchEvent(
+    new window.MessageEvent('message', {
+      data: { __alpha: 1, type: 'pick', selector: 'main > h1', tag: 'h1', text: 'Welcome', html: '<h1>Welcome</h1>', rect: { w: 300, h: 40 } },
+    }),
+  );
+  await wait(50);
+  const bar = doc.querySelector('#visual-edit');
+  assert.ok(bar, 'the visual edit bar exists');
+  assert.equal(bar.hidden, false, 'picking an element opens it');
+  assert.match(bar.textContent, /h1/);
+  const actions = [...bar.querySelectorAll('.ve-action')].map((b) => b.dataset.action);
+  assert.deepEqual(actions, ['text', 'color', 'space', 'size', 'hide', 'delete']);
+
+  bar.querySelector('[data-action="text"]').click();
+  await wait(20);
+  const field = bar.querySelector('.ve-field');
+  assert.ok(field, 'text edit asks for a value');
+  field.value = 'Hello world';
+  [...bar.querySelectorAll('.btn')].find((b) => /Apply/.test(b.textContent)).click();
+  await wait(30);
+
+  assert.equal(bar.hidden, true, 'the bar closes once applied');
+  const prompt = doc.querySelector('#prompt').value;
+  assert.match(prompt, /<h1>/);
+  assert.match(prompt, /main > h1/);
+  assert.match(prompt, /"Hello world"/);
+  assert.match(prompt, /one edit/i);
+  doc.querySelector('#prompt').dispatchEvent(new window.Event('input', { bubbles: true }));
+});
+
+test('the agent fixes a broken preview on its own, once', { skip }, async () => {
+  const { window } = ctx;
+  const app = window.__alphacode;
+  const doc = window.document;
+
+  app.state.settings.autoVerify = true;
+  const before = (await app.state.store.messages(app.state.thread.id)).length;
+  await app.send('make the hero bigger');
+  assert.ok(app.state.harness.filesChanged.size > 0, 'the turn wrote files');
+
+  // The preview reports a real runtime error as it boots after the reload —
+  // exactly what the iframe does in a browser.
+  window.dispatchEvent(
+    new window.MessageEvent('message', {
+      data: { __alpha: 1, type: 'error', message: "Cannot read properties of undefined (reading 'price')", line: 42, stack: 'at render (app.js:42:9)' },
+    }),
+  );
+  await wait(3000);
+
+  const text = (m) => String(m?.content?.text ?? m?.text ?? '');
+  const messages = await app.state.store.messages(app.state.thread.id);
+  assert.ok(messages.length > before + 2, `a follow-up turn ran (${messages.length - before} messages)`);
+  const fix = messages.filter((m) => m.role === 'user').map(text).find((t) => /preview is throwing these errors/i.test(t));
+  assert.ok(fix, 'the agent sent itself the preview errors');
+  assert.match(fix, /reading 'price'/, 'the actual message travels, not a summary');
+  assert.match(fix, /do not rewrite the whole project/i, 'it asks for a targeted fix');
+
+  // And it does not loop: the same error is never offered again.
+  const userMessages = messages.filter((m) => m.role === 'user').length;
+  await wait(2200);
+  const later = (await app.state.store.messages(app.state.thread.id)).filter((m) => m.role === 'user').length;
+  assert.equal(later, userMessages, 'no second fix pass for the same error');
+  app.state.settings.autoVerify = false;
+});

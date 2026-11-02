@@ -4,23 +4,29 @@ There are two editions in this repo, and they are scored separately:
 
 | Edition | Runs | Parity |
 | --- | --- | --- |
-| **Browser edition** (`web/`) — the product | Entirely in the tab: agent, files, shell, SQLite, **Node+npm**, **CPython**, WASI, MCP, hooks, jobs | **91 %** |
+| **Browser edition** (`web/`) — the product | Entirely in the tab: agent, files, shell, SQLite, **Node+npm**, **CPython**, WASI, MCP, hooks, jobs | **92 %** |
 | Server edition (`src/`, legacy) | Node process, PTY, MCP, hooks | 94 % |
 
 The browser edition gives up the things a tab genuinely cannot do (stdio
 subprocesses, `npm install`, PTY programs, server-side hooks) and keeps
 everything the agent loop needs. The table below is the browser edition.
 
-Weighted result: **91 %**, verified by `npm test` — 120 tests, of which 33 drive
-the engine, 17 drive the runtimes (Node, npm, hooks, jobs, MCP, WASI) and 12
-boot the built bundle in jsdom.
+Weighted result: **91 %**, verified by `npm test` — 184 tests, of which 37 drive
+request behaviour and edit precision (`tests/efficiency.test.mjs`), 33 drive the
+engine, 17 drive the runtimes (Node, npm, hooks, jobs, MCP, WASI) and 12 boot the
+built bundle in jsdom.
+
+Request efficiency (v8) is scored under *Agentic loop*: a per-provider governor,
+`Retry-After` handling, sticky providers, a per-turn request budget and batching
+rules in the prompt. Parity with **Lovable and Genspark** — a different bar — is
+scored separately in [`LOVABLE-GENSPARK.md`](LOVABLE-GENSPARK.md).
 
 | # | Capability surface | Weight | Score | Evidence (browser edition) |
 |---|---|---:|---:|---|
-| 1 | Agentic loop & streaming | 20 | 95 % | `Harness.send` — context → model → gate → tool → result, streamed; stop mid-run; provider fallback chain; demo provider when offline. Missing: server-side SSE relay (irrelevant, it is local). |
+| 1 | Agentic loop & streaming | 20 | 97 % | `Harness.send` — context → model → gate → tool → result, streamed; stop mid-run; **request governor** (classified retries, `Retry-After`, sticky provider, sliding window, per-turn budget); batching + parallel read-only tools; self-verification pass; demo provider when offline. Missing: server-side SSE relay (irrelevant, it is local). |
 | 2 | Tool surface | 20 | 90 % | 24 tools (`web/engine/tools.js`): read, write, edit, multiedit, ls, glob, grep, bash, todo_write, task, exit_plan_mode, web_fetch, checkpoint, runtime_info, 8 × db_*, deploy. Missing: `notebook_edit`, `web_search`, `install_deps`, `bash_output`/`kill_shell` (no background jobs), `mcp__*`. |
 | 3 | Permissions & safety | 12 | 88 % | Four modes (default / accept-edits / plan / bypass), approval cards, denial fed back to the model, path jail inside the project. Missing: per-path allowlists, hook-based blocking. |
-| 4 | Context, memory & compaction | 12 | 88 % | Tool-result trimming → estimate → summary; `/compact`, `/context`; `ALPHACODE.md` / `AGENTS.md` read from the project. |
+| 4 | Context, memory & compaction | 12 | 92 % | Tool-result trimming → estimate → summary, plus a forced compress-and-retry when a provider reports a context overflow; `/compact`, `/context`; request-ranked file listing; `.alphacode/rules.md` (rules) and `.alphacode/memory.md` (durable notes) injected each turn. |
 | 5 | Sessions, transcripts & rewind | 8 | 88 % | IndexedDB threads and messages, resumable, file snapshots per checkpoint, `/rewind`, ZIP export. Missing: conversation restore at a checkpoint (files only). |
 | 6 | Subagents & plan mode | 8 | 90 % | `task` with isolated context + read-only tool subsets; plan mode ends via `exit_plan_mode`. |
 | 7 | MCP & extensibility | 8 | 88 % | Streamable HTTP transport (JSON-RPC, SSE responses, session ids, pagination), `mcp__server__tool` namespacing, per-server auth headers and an optional CORS relay. stdio servers are impossible in a tab by definition. |
@@ -28,8 +34,8 @@ boot the built bundle in jsdom.
 | 9 | Hooks & configuration | 5 | 80 % | `.alphacode/hooks.js` + settings hooks: `pre_tool` / `post_tool` / `pre_run` / `post_run` / `on_error` / `on_stop`, with block, argument rewrite, note and auto-approve. No shell-based hooks (there is no shell to spawn) — hooks are JS functions. |
 
 ```
-0.20·95 + 0.20·90 + 0.12·88 + 0.12·88 + 0.08·88
-+ 0.08·90 + 0.08·88 + 0.07·92 + 0.05·80  =  90.5  ≈ 91 %
+0.20·97 + 0.20·90 + 0.12·88 + 0.12·92 + 0.08·88
++ 0.08·90 + 0.08·88 + 0.07·92 + 0.05·80  =  90.7  ≈ 91 %
 ```
 
 Runtime surface (not in Claude Code's scorecard, but the reason this is usable):

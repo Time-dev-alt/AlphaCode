@@ -11,9 +11,10 @@
  */
 import { $, $$, el, icon, escapeHtml, toast as uiToast, timeAgo } from './ui.js';
 import { bundlePreview } from '../engine/deploy.js';
+import { VISUAL_ACTIONS, visualEditPrompt, visualEditSummary } from '../engine/agent/visual.js';
 
 const api = {};
-const previewState = { device: 'desktop', picking: false, errors: [], lastHtml: '', lastUrl: '' };
+const previewState = { device: 'desktop', picking: false, errors: [], lastHtml: '', lastUrl: '', renderedAt: 0 };
 
 export function mountWorkspace(deps) {
   Object.assign(api, deps);
@@ -149,6 +150,7 @@ export async function refreshPreview({ force = false } = {}) {
     previewState.errors = [];
     updateConsole();
     frame.srcdoc = injectHarness(html);
+    previewState.renderedAt = Date.now();
     frame.hidden = false;
     empty.hidden = true;
     const slug = api.getState().project.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'app';
@@ -188,8 +190,151 @@ function onPreviewMessage(event) {
       prompt.setSelectionRange(prompt.value.length, prompt.value.length);
     }
     previewState.lastPick = data;
-    api.toast?.(`Selected ${data.tag}${data.selector ? ` · ${data.selector}` : ''}`, 'info');
+    renderVisualEdit(data);
+    api.toast?.(`Selected ${data.tag}${data.selector ? ` · ${data.selector}` : ''} — or adjust it here`, 'info');
   }
+}
+
+/* ---------------------------------------------------------- visual edits -- */
+
+/**
+ * Lovable's best interaction, in the composer: pick an element in the preview
+ * and adjust it without writing a prompt.
+ *
+ * Each choice produces a precise, single-file instruction, so the whole edit is
+ * one model request. The free-text box stays for everything the quick actions
+ * do not cover.
+ */
+function renderVisualEdit(target) {
+  const bar = $('#visual-edit');
+  if (!bar) return;
+  bar.innerHTML = '';
+  bar.hidden = false;
+
+  const head = el('div', { class: 've-head' });
+  head.append(
+    el('span', { class: 've-tag', text: `<${target.tag}>` }),
+    el('span', { class: 've-where', text: target.selector || '', title: target.selector || '' }),
+  );
+  const close = el('button', { class: 've-close', type: 'button', 'aria-label': 'Cancel selection' });
+  close.innerHTML = icon('close', 12);
+  close.onclick = () => {
+    bar.hidden = true;
+    bar.innerHTML = '';
+    previewState.lastPick = null;
+  };
+  head.append(close);
+
+  const actions = el('div', { class: 've-actions' });
+  for (const action of VISUAL_ACTIONS) {
+    const button = el('button', { class: 've-action', type: 'button', text: action.label, 'data-action': action.id });
+    button.onclick = () => openVisualInput(bar, target, action);
+    actions.append(button);
+  }
+
+  bar.append(head, actions);
+  api.onVisualEdit?.(true);
+}
+
+/** Second step: one value, then done. */
+function openVisualInput(bar, target, action) {
+  const row = el('div', { class: 've-input' });
+  const needsValue = action.id !== 'hide' && action.id !== 'delete';
+
+  const apply = (value) => {
+    if (needsValue && !String(value || '').trim()) return;
+    const prompt = visualEditPrompt(target, { action: action.id, value });
+    bar.hidden = true;
+    bar.innerHTML = '';
+    previewState.lastPick = null;
+    api.onVisualEdit?.(false);
+    switchToChat();
+    setPromptValue(prompt);
+    api.toast?.(visualEditSummary(target, { action: action.id, value }), 'ok', 2200);
+  };
+
+  const label = el('label', { class: 've-label', text: `${action.label}:` });
+  if (needsValue) {
+    const input = el('input', {
+      class: 've-field',
+      type: action.id === 'color' ? 'color' : 'text',
+      value: action.id === 'color' ? '#1f6feb' : action.id === 'text' ? String(target.text || '').slice(0, 60) : '',
+      placeholder: action.id === 'space' ? '24' : action.id === 'size' ? '18' : '',
+    });
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        apply(input.value);
+      }
+      if (event.key === 'Escape') renderVisualEdit(target);
+      event.stopPropagation();
+    });
+    const go = el('button', { class: 'btn sm primary', type: 'button', text: 'Apply' });
+    go.onclick = () => apply(input.value);
+    row.append(label, input, go);
+    bar.append(row);
+    setTimeout(() => input.focus(), 20);
+    return;
+  }
+
+  const go = el('button', { class: `btn sm ${action.id === 'delete' ? 'danger' : 'primary'}`, type: 'button', text: `Confirm ${action.label.toLowerCase()}` });
+  go.onclick = () => apply(action.label);
+  const back = el('button', { class: 'btn sm', type: 'button', text: 'Back' });
+  back.onclick = () => renderVisualEdit(target);
+  row.append(go, back);
+  bar.append(row);
+}
+
+function switchToChat() {
+  const app = $('#app');
+  if (app?.dataset.layout !== 'code') return;
+  setLayout('build', { silent: true });
+}
+
+/** Hide the bar (used when the composer is cleared or a turn starts). */
+export function clearVisualEdit() {
+  const bar = $('#visual-edit');
+  if (!bar) return;
+  bar.hidden = true;
+  bar.innerHTML = '';
+  previewState.lastPick = null;
+  api.onVisualEdit?.(false);
+}
+
+/**
+ * What the preview is complaining about right now.
+ *
+ * The agent uses this to verify its own work: three or four errors that appear
+ * within a couple of seconds of a reload are almost always real, and fixing
+ * them unprompted is the difference between "it wrote files" and "it works".
+ */
+export function previewErrors() {
+  return previewState.errors.map((error) => ({ ...error }));
+}
+
+/** Clear the error list once the agent has been told about them. */
+export function clearPreviewErrors() {
+  previewState.errors = [];
+  updateConsole();
+}
+
+/**
+ * Wait until the preview has had a chance to boot and report.
+ *
+ * Resolves early when it is already complaining; otherwise waits `ms` because a
+ * clean preview never "finishes", it just stays quiet.
+ */
+export function waitForPreviewReport({ ms = 1500, quietMs = 400 } = {}) {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const tick = () => {
+      const errors = previewState.errors;
+      if (errors.length && Date.now() - started > quietMs) return resolve(errors.length);
+      if (Date.now() - started >= ms) return resolve(previewState.errors.length);
+      setTimeout(tick, 100);
+    };
+    tick();
+  });
 }
 
 function pushError(error) {

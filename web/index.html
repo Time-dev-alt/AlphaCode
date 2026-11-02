@@ -137,12 +137,16 @@
 
           <div class="composer" id="composer">
             <div class="attach-strip" id="attach-strip" hidden></div>
+            <div class="visual-edit" id="visual-edit" hidden></div>
             <div class="slash-menu" id="slash-menu" hidden></div>
             <textarea id="prompt" rows="1" placeholder="Describe the app you want, or ask for a change…" aria-label="Message the agent"></textarea>
             <div class="composer-bar">
               <button class="composer-icon" id="btn-attach" title="Attach a file" aria-label="Attach a file" data-icon="paperclip" data-icon-size="16"></button>
               <button class="pill" id="btn-mode" title="Permission mode — ⇧Tab to cycle"><span data-icon="shield" data-icon-size="12"></span><span id="mode-label">default</span></button>
               <button class="pill" id="btn-model" title="Model — click to change"><span data-icon="spark" data-icon-size="12"></span><span id="chip-model-txt">kilo/auto</span></button>
+              <button class="pill req-pill" id="req-pill" hidden title="Model requests used in this turn">
+                <span data-icon="bolt" data-icon-size="12"></span><span id="req-meter">0</span>
+              </button>
               <span class="ctx" id="ctx-meter" title="Context used in this session">
                 <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><circle cx="12" cy="12" r="9" class="ctx-track"/><circle cx="12" cy="12" r="9" class="ctx-fill" id="ctx-ring" pathLength="100" stroke-dasharray="0 100"/></svg>
               </span>

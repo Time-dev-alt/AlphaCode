@@ -97,6 +97,8 @@ export const PLATFORM_CHAIN = ['kilo', 'opencode'];
  * Build the attempt list for one request.
  * Order: explicit BYOK → platform free routers (kilo/opencode) → demo.
  */
+import { readRetryAfter } from './agent/governor.js';
+
 export function planAttempts({ model = '', settings = {} } = {}) {
   const keys = settings.keys || {};
   const byok = Object.entries(keys)
@@ -260,10 +262,14 @@ export async function streamChat({
     });
   } catch (err) {
     if (err?.name === 'AbortError') throw err;
-    throw new Error(
+    const failure = new Error(
       `${meta.label} is unreachable from this browser (${err.message || 'network error'}). ` +
         `If you expected this to work, the provider is probably blocking cross-origin requests — use a BYOK provider that allows CORS, or proxy it yourself.`,
     );
+    failure.status = 0;
+    failure.provider = provider;
+    failure.network = true;
+    throw failure;
   }
 
   if (!res.ok) {
@@ -281,14 +287,39 @@ export async function streamChat({
           : res.status === 429
             ? ' — rate limited, try again shortly'
             : '';
-    throw new Error(`${meta.label} ${res.status}: ${detail}${hint}`);
+    // The status and the provider's own reset time travel with the error, so the
+    // governor can decide between "wait 20s" and "never use this key again"
+    // instead of guessing from the message.
+    const error = new Error(`${meta.label} ${res.status}: ${detail}${hint}`);
+    error.status = res.status;
+    error.provider = provider;
+    error.retryAfterMs = readRetryAfter(res.headers);
+    error.detail = detail;
+    throw error;
   }
 
   const acc = { content: '', reasoning: '', toolCalls: [], usage: {}, finishReason: 'stop' };
   const toolIndex = new Map();
 
+  // A stream can also die mid-flight. Tagging it keeps the governor's
+  // classification honest: a dropped connection is a network failure and is
+  // worth one retry, not a permanent blacklist.
+  const guard = (fn) => async (...args) => {
+    try {
+      return await fn(...args);
+    } catch (err) {
+      if (err?.name === 'AbortError' || err?.status !== undefined) throw err;
+      const failure = new Error(`${meta.label} stream failed (${err?.message || 'network error'})`);
+      failure.status = 0;
+      failure.provider = provider;
+      failure.network = true;
+      failure.partial = acc.content;
+      throw failure;
+    }
+  };
+
   if (anthropic) {
-    await readSse(res, (ev) => {
+    await guard(readSse)(res, (ev) => {
       if (ev.type === 'content_block_start' && ev.content_block?.type === 'tool_use') {
         toolIndex.set(ev.index, { id: ev.content_block.id, name: ev.content_block.name, arguments: '' });
       } else if (ev.type === 'content_block_delta') {
@@ -309,7 +340,7 @@ export async function streamChat({
     });
     acc.toolCalls = [...toolIndex.values()].filter((t) => t.name);
   } else {
-    await readSse(res, (chunk) => {
+    await guard(readSse)(res, (chunk) => {
       const choice = chunk.choices?.[0];
       if (chunk.usage) acc.usage = { input: chunk.usage.prompt_tokens || 0, output: chunk.usage.completion_tokens || 0 };
       if (!choice) return;
@@ -345,8 +376,18 @@ export async function streamChat({
 /** Deterministic offline model so the harness is demoable without any network. */
 export async function demoCompletion({ messages = [], tools = [], onEvent = () => {}, model = 'demo-1' }) {
   const last = [...messages].reverse().find((m) => m.role === 'user')?.content || '';
-  const toolResults = messages.filter((m) => m.role === 'tool');
-  const step = toolResults.length;
+  const lastUserIndex = messages.map((m) => m.role).lastIndexOf('user');
+  // Steps are counted *within* the current turn. Counting them across the whole
+  // conversation made the demo replay its scaffold on every follow-up once the
+  // thread history started being replayed to the model.
+  const turnStep = messages.slice(Math.max(0, lastUserIndex)).filter((m) => m.role === 'tool').length;
+  // Has this project been scaffolded already? A demo cannot read the filesystem,
+  // but the transcript says so, which is enough to behave like an editor rather
+  // than a generator on turn two.
+  const built = messages
+    .slice(0, Math.max(0, lastUserIndex))
+    .some((m) => m.role === 'tool' && m.name === 'write');
+
   const plan = [
     { name: 'todo_write', args: { todos: [{ content: 'Scaffold the app', status: 'in_progress' }, { content: 'Verify the build', status: 'pending' }] } },
     { name: 'write', args: { file_path: 'index.html', content: DEMO_PAGE } },
@@ -354,18 +395,35 @@ export async function demoCompletion({ messages = [], tools = [], onEvent = () =
     { name: 'write', args: { file_path: 'style.css', content: DEMO_CSS } },
   ];
   const say = (text) => onEvent({ type: 'text', text });
-
-  if (step < plan.length && tools.some((t) => t.function?.name === plan[step].name)) {
-    const call = { id: `call_demo_${step}`, name: plan[step].name, arguments: JSON.stringify(plan[step].args) };
+  const emit = (name, args, id) => {
+    const call = { id, name, arguments: JSON.stringify(args) };
+    onEvent({ type: 'tool_call', call });
     // No narration per step: the activity timeline already reports what is
     // happening, and repeating it as prose splits the answer into fragments.
-    onEvent({ type: 'tool_call', call });
-    // No prose between tool calls: this content is persisted and replayed as an
-    // assistant message, so a label here would fragment the saved transcript.
     return { content: '', reasoning: '', toolCalls: [call], usage: { input: 120, output: 60 }, finishReason: 'tool_calls', model };
+  };
+
+  if (!built && turnStep < plan.length && tools.some((t) => t.function?.name === plan[turnStep].name)) {
+    return emit(plan[turnStep].name, plan[turnStep].args, `call_demo_${turnStep}`);
   }
 
-  const text = `Here is a landing page you can push around.\n\n- \`index.html\` — hero, three beans, a three-step section and a pricing block\n- \`style.css\` — dark palette, one accent, responsive down to a phone\n\nSay what to change — “make the hero bigger”, “add a testimonial”, “try a light theme” — or open **Files** to edit it yourself.\n\n_This is the offline demo model. Add a provider key under Settings → Providers for a real one._`;
+  // A follow-up ("make the hero bigger") still has to *do* something, or
+  // iterating in demo mode feels broken.
+  const wantsChange = /(change|make|add|fix|tweak|bigger|smaller|larger|colour|color|theme|header|footer|price|testimonial|button|style)/i.test(String(last));
+  if (built && turnStep === 0 && wantsChange && tools.some((t) => t.function?.name === 'write')) {
+    return emit(
+      'write',
+      {
+        file_path: 'style.css',
+        content: `${DEMO_CSS}\n/* Adjusted for: ${String(last).slice(0, 60).replace(/\*\//g, '')} */\n.hero h1 {\n  font-size: clamp(2.5rem, 6vw, 4.2rem);\n  letter-spacing: -0.03em;\n}\n.hero {\n  padding-block: clamp(56px, 9vw, 104px);\n}\n`,
+      },
+      'call_demo_tweak',
+    );
+  }
+
+  const text = built
+    ? `Done — I adjusted \`style.css\` (hero scale and vertical rhythm). Look at the preview; say “bigger”, “smaller” or name the section you want next.\n\n_Offline demo model: it can restyle, but a real provider writes real code. Add a key under Settings → Model access._`
+    : `Here is a landing page you can push around.\n\n- \`index.html\` — hero, three beans, a three-step section and a pricing block\n- \`style.css\` — dark palette, one accent, responsive down to a phone\n\nSay what to change — “make the hero bigger”, “add a testimonial”, “try a light theme” — or open **Files** to edit it yourself.\n\n_This is the offline demo model. Add a provider key under Settings → Model access for a real one._`;
   for (const chunk of text.match(/[\s\S]{1,24}/g) || []) {
     say(chunk);
     await new Promise((r) => setTimeout(r, 8));

@@ -89,11 +89,15 @@ grid with a consistent stroke. No icon font, no emoji, no mixing.
 1. **Pick a template or describe it.** "A landing page for a coffee subscription."
 2. **Watch it build.** The agent writes files; the preview on the right updates as
    each tool finishes. No build step, no server, no spinner.
-3. **Iterate by pointing.** Hit the cursor button, click anything in the preview,
-   and the composer is pre-filled with the element you selected.
-4. **Errors fix themselves.** Runtime errors and `console.error` from the preview
-   land in a drawer with one button: *Fix with AI* — it sends the stack trace back
-   to the agent.
+3. **Iterate by pointing.** Hit the cursor button and click anything in the
+   preview. A small bar appears with the things people actually want there —
+   text, colour, spacing, text size, hide, delete — and each one becomes a
+   precise, single-file instruction. Anything else: type it, and the element you
+   picked is already referenced in the prompt.
+4. **Errors fix themselves.** After a turn that changed files, the agent waits
+   for the preview to boot and, if it threw, fixes it in one follow-up pass
+   without being asked. The drawer's *Fix with AI* button still exists for
+   errors you want to deal with later.
 5. **Rewind if you dislike it.** Every turn snapshots the project; the history
    drawer restores any checkpoint.
 6. **Publish.** Instant claimable preview, or push to your GitHub and import to
@@ -102,6 +106,36 @@ grid with a consistent stroke. No icon font, no emoji, no mixing.
 What we do differently: no account to sign up for, keys stay in your browser,
 the database is a real SQLite file you own, and there is no backend of ours to
 disappear.
+
+## Requests are the scarce resource
+
+A turn is a loop of model requests, and free tiers are small — a handful a
+minute. The old loop walked the entire provider chain on any error, so one 429
+became five failures, every provider ended up cooling down, and the turn that
+needed twelve requests never finished. v8 makes the request pattern deliberate:
+
+| Decision | What it does | Where |
+| --- | --- | --- |
+| **Classify before retrying** | 429 / 5xx / network retry with backoff; 401, 402, 404 never retry — they park the key instead of burning it | `web/engine/agent/governor.js` |
+| **Honour the provider's clock** | `Retry-After` and `x-ratelimit-reset` are read from the response; no guessing at the backoff | same |
+| **Stay where it works** | The provider that just answered is tried first until it actually fails. No rotating after success | `governor.order()` |
+| **Cap the rate, not just the count** | A sliding per-provider window keeps a fast tool loop inside what the tier allows | `governor.reserve()` |
+| **Budget the turn** | 8 requests by default (configurable 4–16). The agent is told how many are left and stops cleanly, with a **Continue** button instead of a failed turn | `Harness.send` |
+| **Batch in the prompt** | The system prompt requires independent tool calls in *one* response, complete files in one `write`, no re-reads, no per-step verification | `web/engine/agent/prompt.js` |
+| **Run tools in parallel** | A batch of read-only calls goes out together; identical calls in one message are answered once | `Harness.executeToolCalls` |
+| **Rank the file list** | Files are ranked by the words in the request, recency and entry-point status instead of listing the first eighty | `prompt.rankFiles` |
+| **Remember cooldowns** | A provider parked for a bad key is still parked after a reload — only cooldowns are stored, never keys | `localStorage` |
+
+The result in this repo's own numbers: a five-file landing page is **two**
+requests, not six (`tests/efficiency.test.mjs`), and a runaway loop stops at the
+budget with a resumable turn instead of draining the allowance.
+
+```bash
+npm test   # 184 tests, including the request-behaviour ones
+```
+
+If you want the gory detail — including the parity matrix against Lovable and
+Genspark — read [`docs/LOVABLE-GENSPARK.md`](docs/LOVABLE-GENSPARK.md).
 
 ## What it does
 

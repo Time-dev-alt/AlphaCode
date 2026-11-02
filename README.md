@@ -129,6 +129,10 @@ needed twelve requests never finished. v8 makes the request pattern deliberate:
 | **Instant scaffolds** | `scaffold` writes a complete, working landing page / dashboard / todo app / docs site — 300+ lines, with no model request at all. The template gallery uses it too: picking a template produces a finished app before the model is involved | `web/engine/agent/scaffolds.js` |
 | **Walk models, not providers** | A free router that refuses one model walks the next candidate inside the *same* request, so a retired model costs one attempt instead of a provider failover. Tick the models you trust in Settings → Models | `harness.js` + `agent/catalog.js` |
 | **Retry through the same origin** | When a keyless router is blocked by the network (403/405, stripped `Origin`, a filtering proxy) the call is retried through `/api/llm/<router>`, which never sees a user key | `providers.js` + `functions/api/llm` |
+| **Check the router before you type** | One `GET /models` per free router on boot; the status pill says *kilo* / *via relay* / *offline* instead of leaving a dead router to be discovered by a failed prompt | `agent/catalog.js` |
+| **Resume, don't restart** | A paused turn continues in place — same history, same half-finished file, a "resumed" divider instead of a fake user message | `web/app/main.js` |
+| **Rebuild the preview incrementally** | The iframe is only reloaded when the composed page actually changed, and only files whose stamp moved are re-read, so a turn no longer throws away scroll position and form state | `web/app/workspace.js` |
+| **Ship-check before shipping** | Entry point, referenced assets, viewport tag, GitHub session — all checked *before* a provider tab opens, split into blockers and warnings | `engine/deploy.js` |
 | **Keep going while it is working** | A productive turn borrows another segment of requests (3 segments max, still gated by the sliding window) instead of stopping at the first checkpoint | `Harness.send` + `governor.extend()` |
 | **Run tools in parallel** | A batch of read-only calls goes out together; identical calls in one message are answered once | `Harness.executeToolCalls` |
 | **Rank the file list** | Files are ranked by the words in the request, recency and entry-point status instead of listing the first eighty | `prompt.rankFiles` |
@@ -166,7 +170,7 @@ Genspark — read [`docs/LOVABLE-GENSPARK.md`](docs/LOVABLE-GENSPARK.md).
 | Deploys | Push to *your* GitHub with one OAuth click, then import into your own Cloudflare / Vercel / Netlify account |
 | Models | Keyless free routing (Kilo, OpenCode Zen) as the default, plus BYOK for OpenAI, Anthropic, Google, Groq, DeepSeek, Mistral, xAI, Together, OpenRouter, or any OpenAI-compatible endpoint. **Fetch models** asks each provider what it serves right now and lets you tick the fallback chain |
 | Native code | C, C++ and Rust compile to WebAssembly in the tab (`cc`, `clang++`, `rustc`) once the switch in Settings → Runtimes is on, or through a compile endpoint; `wasm main.wasm` runs any WASI module |
-| Node sandbox | StackBlitz **WebContainers** runs a real Node and npm in the tab — the path for Vite/Next/Express projects that need the real thing |
+| Node sandbox | StackBlitz **WebContainers** runs a real Node and npm in the tab — the path for Vite/Next/Express projects that need the real thing. Successful installs are cached in OPFS, so the next visit skips `npm install` |
 | Keys | Stored in the browser (IndexedDB + `localStorage`), never sent anywhere except to the provider you chose |
 
 ---
@@ -197,7 +201,16 @@ Full walkthroughs for Netlify, Vercel and plain static hosting: [`docs/DEPLOY.md
 > **Note on Cloudflare's UI:** new projects in the dashboard are nudged towards
 > *Workers* (Workers Builds). This repo works on **both**:
 > - **Pages** → build `npm run build`, output `dist` (route `functions/` is picked up automatically).
-> - **Workers + static assets** → build `npm run build`, deploy command `npx wrangler deploy` (uses the committed `wrangler.jsonc`, `assets.directory = "dist"`).
+> - **Workers + static assets** → build command **empty** (wrangler runs
+>   `npm run build` itself, from `build.command` in the committed
+>   `wrangler.jsonc`), deploy command **`npx wrangler deploy`**.
+>
+> ⚠️ **Do not use `npx wrangler preview` as the deploy command.** It is an
+> *open-beta* command — Wrangler prints exactly that — and it publishes a
+> preview deployment that expires instead of the production Worker. That was
+> the failing `Workers Builds: nex` check: the build ran `wrangler preview`
+> against a checkout with no `dist/` (it is generated and git-ignored) and
+> never deployed anything.
 >
 > Direct upload also works: `npx wrangler pages deploy dist --project-name alphacode`.
 
@@ -208,6 +221,7 @@ Both configs are committed and need no dashboard fiddling:
 | Host | Build command | Publish / output | Config file |
 | --- | --- | --- | --- |
 | Cloudflare Pages | `npm run build` | `dist` | `wrangler.jsonc`, `functions/`, `dist/_headers` |
+| Cloudflare Workers | *(empty — `wrangler.jsonc` → `build.command`)* | `npx wrangler deploy` | `wrangler.jsonc` |
 | Netlify | `npm run build` | `dist` | `netlify.toml`, `netlify/functions/` |
 | Vercel | `npm run build` | `dist` | `vercel.json`, `api/` |
 
@@ -343,7 +357,10 @@ Next build, an Express API — turn on **Settings → Runtimes → Node sandbox*
    Before booting, the panel checks the four things a boot needs — secure
    context, `SharedArrayBuffer`, the two headers, and a browser that supports it
    — and names whichever one is missing instead of failing inside the SDK.
-3. **npm install** and **npm run dev** run inside the container; `server-ready`
+3. **npm install** and **npm run dev** run inside the container; a successful
+   install is snapshotted into OPFS under a fingerprint of `package.json` +
+   the lockfile, so the next boot mounts it back and skips the install
+   (Settings → Runtimes → *Forget cached installs* clears it); `server-ready`
    points the preview iframe at the real dev-server URL, and files the container
    writes are mirrored back into the project.
 

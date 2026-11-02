@@ -11,10 +11,45 @@
  */
 import { $, $$, el, icon, escapeHtml, toast as uiToast, timeAgo } from './ui.js';
 import { bundlePreview } from '../engine/deploy.js';
+import { isBinaryPath } from '../engine/fs.js';
 import { VISUAL_ACTIONS, visualEditPrompt, visualEditSummary } from '../engine/agent/visual.js';
 
 const api = {};
-const previewState = { device: 'desktop', picking: false, errors: [], lastHtml: '', lastUrl: '', renderedAt: 0 };
+const previewState = {
+  device: 'desktop',
+  picking: false,
+  errors: [],
+  lastHtml: '',
+  lastUrl: '',
+  renderedAt: 0,
+  // path → {stamp, text}: the preview only re-reads the files that changed.
+  fileCache: new Map(),
+  signature: '',
+  // Paths written/removed since the last build. File mtimes in OPFS are coarse
+  // (milliseconds), so "same size + same mtime" is not proof that nothing
+  // changed — an agent rewriting one word in one file can look identical. The
+  // filesystem tells us exactly which paths moved; that is the authority.
+  dirty: new Set(),
+  watching: false,
+};
+
+/** Subscribe once to filesystem changes; cheap and synchronous. */
+function watchFilesForPreview() {
+  if (previewState.watching) return;
+  const fs = api.getState?.().fs;
+  if (!fs?.onChange) return;
+  previewState.watching = true;
+  fs.onChange((event) => {
+    const projectId = api.getState?.().project?.id;
+    if (!projectId || event.projectId !== projectId) return;
+    if (event.type === 'write' && event.path) previewState.dirty.add(event.path);
+    else if (event.type === 'remove' && event.path) previewState.dirty.add(event.path);
+    else if (event.type === 'move') {
+      if (event.from) previewState.dirty.add(event.from);
+      if (event.to) previewState.dirty.add(event.to);
+    }
+  });
+}
 
 export function mountWorkspace(deps) {
   Object.assign(api, deps);
@@ -133,23 +168,67 @@ const HARNESS = `<script>(function(){
   },true);
 })();<\/script>`;
 
+/**
+ * Rebuild the preview, doing as little as possible.
+ *
+ * The old version re-read *every* project file and re-bundled the whole page on
+ * every trigger — after each turn, after each save, on a 250 ms debounce — and
+ * then assigned `srcdoc` even when the bytes were identical, which reloads the
+ * iframe and throws away its scroll position and form state. Now:
+ *
+ *   1. the file list gives a signature (path + size + mtime); if it has not
+ *      changed, nothing is read and nothing is bundled;
+ *   2. only files whose stamp changed are re-read (the rest come from a cache);
+ *   3. `srcdoc` is only assigned when the composed HTML differs — `force` is
+ *      reserved for "the user asked to reload", never for "a turn finished".
+ */
 export async function refreshPreview({ force = false } = {}) {
-  if (!api.getState?.().project) return;
+  const state = api.getState?.();
+  if (!state?.project) return;
   // A WebContainer dev server owns the preview while it is running: it serves a
   // real http:// URL, and replacing that with a bundled srcdoc would throw away
   // everything npm just built.
-  if (api.getState?.().containerUrl) return;
+  if (state.containerUrl) return;
   const frame = $('#preview-frame');
   const empty = $('#preview-empty');
   try {
-    const files = await api.getState().fs.snapshot(api.getState().project.id);
+    watchFilesForPreview();
+    const listed = (await state.fs.list(state.project.id)).filter((file) => !file.dir);
+    const signature = listed
+      .map((file) => `${file.path}:${file.size || 0}:${file.updatedAt || 0}`)
+      .sort()
+      .join('|');
+    const dirty = previewState.dirty;
+    if (!force && signature === previewState.signature && !dirty.size) return;
+    if (dirty.size) previewState.signature = '';
+
+    const files = {};
+    for (const file of listed) {
+      if (file.path.startsWith('node_modules/')) continue;
+      if (isBinaryPath(file.path)) continue;
+      if ((file.size || 0) > 2_000_000) continue;
+      const stamp = `${file.size || 0}:${file.updatedAt || 0}`;
+      const cached = previewState.fileCache.get(file.path);
+      if (cached && cached.stamp === stamp && !dirty.has(file.path)) {
+        files[file.path] = cached.text;
+        continue;
+      }
+      const text = await state.fs.readText(state.project.id, file.path).catch(() => '');
+      previewState.fileCache.set(file.path, { stamp, text });
+      files[file.path] = text;
+    }
+    // Forget files that no longer exist, or the cache grows for the whole session.
+    for (const path of [...previewState.fileCache.keys()]) if (!(path in files)) previewState.fileCache.delete(path);
+    previewState.signature = signature;
+    dirty.clear();
+
     if (!Object.keys(files).some((f) => f.endsWith('.html'))) {
       frame.hidden = true;
       empty.hidden = false;
       return;
     }
     const html = bundlePreview(files, 'index.html');
-    if (!force && html === previewState.lastHtml) return;
+    if (html === previewState.lastHtml && !force) return;
     previewState.lastHtml = html;
     previewState.errors = [];
     updateConsole();

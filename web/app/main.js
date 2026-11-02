@@ -10,16 +10,17 @@ import { createStore, uid } from '../engine/store.js';
 import { createFsAsync, isBinaryPath, normPath } from '../engine/fs.js';
 import { Shell } from '../engine/shell.js';
 import { openDatabase, saveDatabase, dbFiles, loadEngine } from '../engine/db.js';
-import { createPreview, connectGitHub, deployProject, whoAmI, publishToGitHub, importUrl, DEPLOY_TARGETS } from '../engine/deploy.js';
+import { createPreview, connectGitHub, deployProject, whoAmI, publishToGitHub, importUrl, deployPreflight, DEPLOY_TARGETS } from '../engine/deploy.js';
 import { Harness, Run } from '../engine/harness.js';
 import { canVerify, verifyDecision, verificationPrompt, keyOf, verifySummary } from '../engine/agent/verify.js';
 import { getGovernor } from '../engine/agent/governor.js';
 import { toModelMessages } from '../engine/agent/history.js';
 import { renderScaffold } from '../engine/agent/scaffolds.js';
 import { FREE_MODELS, PROVIDERS, GUEST_MODEL } from '../engine/providers.js';
-import { fetchModels, mergeCatalog } from '../engine/agent/catalog.js';
+import { fetchModels, mergeCatalog, probeModels, describeProbe } from '../engine/agent/catalog.js';
 import { toolchainStatus } from '../engine/wasm-toolchains.js';
 import { bootWebContainer, installInContainer, startDevInContainer, inspectSandbox, setIsolationCookie, SandboxUnavailable } from '../engine/node/webcontainer.js';
+import { projectFingerprint, loadContainerCache, saveContainerCache, clearContainerCaches, containerCacheSize } from '../engine/node/container-cache.js';
 import { runPython, pipInstall, loadPython, pythonReady } from '../engine/python.js';
 import { createNodeSession } from '../engine/node/session.js';
 import { nodepodStatus, NODEPOD_VERSION } from '../engine/node/nodepod.js';
@@ -100,6 +101,9 @@ const state = {
   // WebContainers state: the instance lives for the tab, the URL in the preview.
   wc: null,
   containerUrl: '',
+  // Last answer from `probeModels()` — the status pill's router chip.
+  routerHealth: null,
+  routerProbedAt: 0,
 };
 
 
@@ -547,6 +551,9 @@ async function boot() {
   });
   setStatus('ready');
   renderChrome();
+  // Fire and forget: the app is usable before this answers, and a router that is
+  // down is reported in the pill instead of being discovered by a failed prompt.
+  refreshRouterHealth().catch(() => {});
   if (!state.settings.seenWelcome) {
     state.settings = await state.store.saveSettings({ seenWelcome: true });
     renderWelcome();
@@ -1157,6 +1164,38 @@ function appendActionNotice(text, label, onClick, kind = 'warn') {
   return row;
 }
 
+/**
+ * The seam between a paused turn and its continuation.
+ *
+ * Resuming used to type the word "continue" into the transcript as if the user
+ * had said it — a fake user message they could not delete, and one that reads
+ * like the agent needed nagging. Instead the transcript gets a divider and the
+ * *model* gets the nudge, which is the only place it belongs.
+ */
+function appendResumeDivider(reason = '') {
+  const row = el('div', { class: 'resume-divider' });
+  row.innerHTML = `<span>${icon('play', 11)}<span>resumed${reason ? ` — ${escapeHtml(reason)}` : ''}</span></span>`;
+  transInner().append(row);
+  scrollTranscript();
+  return row;
+}
+
+/**
+ * Continue the interrupted turn in place.
+ *
+ * The run keeps its thread history: `send()` replays the prior messages, so the
+ * model sees the half-finished work and the tool results it already produced.
+ * The only thing that changes is that no user message is appended to the
+ * transcript, and the nudge is marked as a continuation.
+ */
+async function resumeTurn() {
+  if (state.running) return;
+  await send(RESUME_PROMPT, { resume: true });
+}
+
+const RESUME_PROMPT =
+  'Continue from where you were interrupted. The work above is real — do not restart or rewrite what is already correct. Pick up the next unfinished step and finish the task.';
+
 function appendPermission(request) {
   const turn = state.turn || state.lastTurn;
   const host = turn?.tools || transInner();
@@ -1189,17 +1228,24 @@ function appendPermission(request) {
  */
 async function send(text, options = {}) {
   if (!text?.trim() || state.running) return;
-  if (await handleSlash(text.trim())) return;
+  const resuming = options.resume === true;
+  if (!resuming && (await handleSlash(text.trim()))) return;
   if (!state.project) await createProject('My first app', { silent: true });
 
   const inner = transInner();
   inner.querySelector('.welcome')?.remove();
   const outgoing = messageWithAttachments(text);
-  appendUser(text, state.attachments || []);
+  if (resuming) {
+    // No user bubble and no prompt clearing: the person did not type anything,
+    // they pressed Continue on a turn that ran out of requests.
+    appendResumeDivider(options.reason || 'out of requests this minute');
+  } else {
+    appendUser(text, state.attachments || []);
+    setPromptValue('');
+    autoGrow();
+  }
   state.attachments = [];
   renderAttachments();
-  setPromptValue('');
-  autoGrow();
   syncSendState();
   clearVisualEdit();
   resetActivity();
@@ -1555,11 +1601,15 @@ function handleEvent(ev) {
       }
       setStatus('ready');
       finishActivity();
-      refreshPreview({ force: Boolean(ev.filesChanged?.length) });
+      // No `force`: refreshPreview() only re-renders when the bundle actually
+      // changed, so a turn that touched one file does not reload the frame and
+      // throw away the page's scroll position and form state.
+      refreshPreview();
+      if (state.activityProviderErrors?.length) refreshRouterHealth({ force: true }).catch(() => {});
       break;
     }
     case 'budget_exhausted':
-      appendActionNotice(ev.message, 'Continue', () => send('continue'), 'warn');
+      appendActionNotice(ev.message, 'Continue', () => resumeTurn(), 'warn');
       noteActivity('Paused to stay inside the rate limit', `used ${ev.budget} requests this turn`);
       break;
     case 'error':
@@ -1802,6 +1852,38 @@ async function runNpmInstall(extra = []) {
  * live server, so the iframe gets a real URL and the file preview stays out of
  * the way until the sandbox is stopped.
  */
+/** Flat `{path: text}` → the nested tree `instance.mount()` expects. */
+function treeFromFlatFiles(files = {}) {
+  const root = {};
+  for (const [path, text] of Object.entries(files)) {
+    if (typeof text !== 'string' || path.startsWith('node_modules/.bin')) continue;
+    const parts = path.split('/').filter(Boolean);
+    if (!parts.length) continue;
+    let node = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const name = parts[i];
+      if (!node[name] || node[name].directory === undefined) node[name] = { directory: {} };
+      node = node[name].directory;
+    }
+    node[parts[parts.length - 1]] = { file: { contents: text } };
+  }
+  return root;
+}
+
+/** Snapshot the container's node_modules into OPFS after a successful install. */
+async function cacheInstalledModules(instance) {
+  const fingerprint = state.wc?.fingerprint;
+  if (!fingerprint) return;
+  const { snapshotModules } = await import('../engine/node/container-cache.js');
+  const snapshot = await snapshotModules(instance).catch(() => null);
+  if (!snapshot) return;
+  const saved = await saveContainerCache(fingerprint, snapshot).catch(() => null);
+  if (saved?.saved) {
+    wcLog(`\ncached ${saved.files} files (${bytes(saved.bytes)}) — the next visit can skip npm install\n`);
+    state.wc.cached = true;
+  }
+}
+
 function showContainerPreview(url) {
   if (!url) return;
   state.containerUrl = url;
@@ -1956,6 +2038,19 @@ async function runSql() {
 async function doDeploy(target, { projectName, open = true } = {}) {
   if (!state.project) throw new Error('Open a project first');
   const files = await state.fs.snapshot(state.project.id);
+
+  // Everything that can be known locally is checked here, before a provider tab
+  // opens. Failing at step five of five is the expensive kind of failure.
+  const preflight = deployPreflight({ target, files, github: state.github });
+  if (!preflight.ok) {
+    for (const blocker of preflight.blockers) appendNotice(`${blocker.message} ${blocker.fix}`, 'err');
+    toast(preflight.blockers[0].message, 'err', 6000);
+    return { ok: false, blockers: preflight.blockers };
+  }
+  if (preflight.warnings.length) {
+    appendNotice(`Before you ship: ${preflight.warnings.map((row) => row.message).join(' · ')}`, 'warn');
+  }
+
   const result = await deployProject({
     target,
     files,
@@ -1973,7 +2068,7 @@ async function doDeploy(target, { projectName, open = true } = {}) {
     window.open(result.url, '_blank');
   }
   toast(target === 'preview' ? 'Preview ready' : `Opening ${target} import…`, 'ok');
-  return result;
+  return { ...result, ok: true, warnings: preflight.warnings };
 }
 
 async function renderDeployments() {
@@ -2301,6 +2396,10 @@ function openSettings() {
       <div class="row" style="margin-top:8px">
         <button class="btn" id="set-fetch-models" data-icon="refresh" data-icon-size="14">Fetch models</button>
         <span class="hint" id="model-fetch-status">Ask the routers what they serve right now.</span>
+      </div>
+      <div class="field" style="margin-top:10px"><label>Router health</label>
+        <div class="hint" id="router-health-state">not checked yet</div>
+        <div class="row"><button class="btn sm" id="set-probe-routers" data-icon="activity" data-icon-size="13">Check now</button></div>
       </div>`,
     ) + settingsCard(
       'Fallback chain',
@@ -2366,6 +2465,11 @@ function openSettings() {
       </div>
       <div class="row" style="margin-top:8px">
         <button class="link" id="set-wc-newtab" data-icon="external" data-icon-size="13" hidden>Open AlphaCode in its own tab</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <span class="hint" id="wc-cache-state">no cached install</span>
+        <div class="grow"></div>
+        <button class="btn sm" id="set-wc-clear-cache" data-icon="trash" data-icon-size="13">Forget cached installs</button>
       </div>
       <pre class="wc-log" id="wc-log" aria-live="polite"></pre>
       <div class="hint">The switch reloads the tab with two extra headers (COOP/COEP). While they are on, OAuth pop-ups open as tabs and a few cross-origin images in a generated preview may need CORS — turn it off when you are done. Safari cannot boot WebContainers yet.</div>`,
@@ -2485,6 +2589,28 @@ function openSettings() {
   });
 
   /* -------------------------------------------------------------- models -- */
+
+  const paintRouterHealthRow = () => {
+    const node = $('#router-health-state');
+    if (!node) return;
+    const report = describeProbe(state.routerHealth);
+    const [firstLine] = String(report.detail || '').split('\n');
+    node.textContent = state.routerHealth ? `${report.label} — ${firstLine}` : report.detail;
+    node.className = 'hint';
+    node.dataset.tone = report.tone;
+  };
+  paintRouterHealthRow();
+  $('#set-probe-routers')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      await refreshRouterHealth({ force: true });
+      paintRouterHealthRow();
+      toast('Router health refreshed', 'info', 2400);
+    } finally {
+      button.disabled = false;
+    }
+  });
 
   $('#set-fetch-models')?.addEventListener('click', async (event) => {
     const button = event.currentTarget;
@@ -2687,10 +2813,41 @@ function openSettings() {
       },
       onFileWritten: (filePath, contents) => state.fs.write(state.project.id, filePath, contents).catch(() => {}),
     });
-    state.wc = { instance };
+    state.wc = { instance, fingerprint: projectFingerprint(files) };
+
+    // A container is memory: closing the tab used to mean paying for `npm
+    // install` again. The installed tree is snapshotted in OPFS and mounted back
+    // when the manifest has not changed.
+    if (state.wc.fingerprint) {
+      const cached = await loadContainerCache(state.wc.fingerprint).catch(() => null);
+      if (cached) {
+        wcStatus('restoring dependencies from the last install…');
+        wcLog(`\nrestoring ${Object.keys(cached.files).length} files from the cached install…\n`);
+        await instance.mount(treeFromFlatFiles(cached.files)).catch(() => {});
+        state.wc.restored = true;
+        wcLog(`restored — dependencies are already installed (${bytes(cached.bytes)})\n`);
+        wcStatus('dependencies restored from the last install — run npm run dev');
+        return instance;
+      }
+    }
     wcStatus('container ready — run npm install');
     return instance;
   };
+  const paintCacheState = async () => {
+    const node = $('#wc-cache-state');
+    if (!node) return;
+    const size = await containerCacheSize().catch(() => ({ files: 0, bytes: 0 }));
+    node.textContent = size.files
+      ? `${size.files} cached install${size.files === 1 ? '' : 's'} · ${bytes(size.bytes)} — matching projects skip npm install`
+      : 'no cached install yet — one is written after a successful npm install';
+  };
+  paintCacheState();
+  $('#set-wc-clear-cache')?.addEventListener('click', async () => {
+    const removed = await clearContainerCaches().catch(() => 0);
+    if (state.wc) state.wc.restored = false;
+    toast(removed ? `Cleared ${removed} cached install${removed === 1 ? '' : 's'}` : 'Nothing to clear', 'info', 3000);
+    paintCacheState();
+  });
   $('#set-wc-recheck')?.addEventListener('click', () => {
     refreshSandbox();
     toast('Sandbox requirements re-checked', 'info', 2200);
@@ -2713,7 +2870,12 @@ function openSettings() {
     try {
       const instance = await wcBoot();
       const { exitCode } = await installInContainer(instance, { onOutput: wcLog });
-      wcStatus(exitCode === 0 ? 'dependencies installed inside the container' : `npm install exited ${exitCode} — see the log`);
+      if (exitCode === 0) {
+        wcStatus('dependencies installed inside the container');
+        await cacheInstalledModules(instance);
+      } else {
+        wcStatus(`npm install exited ${exitCode} — see the log`);
+      }
     } catch (err) {
       wcStatus(`${err.message}${err.hint ? ` ${err.hint}` : ''}`);
     } finally {
@@ -2882,6 +3044,46 @@ const MODE_INFO = {
   plan: ['plan', 'Read-only — proposes instead of changing'],
   bypass: ['bypass', 'Never asks. Use with care'],
 };
+
+/**
+ * Which free routers actually answer right now.
+ *
+ * One `GET /models` per keyless router, no chat request and no tokens, so it is
+ * cheap enough to run on boot and after a turn that had to fall back. The result
+ * paints a chip in the status pill; nothing else in the app depends on it, so a
+ * probe that fails simply leaves the chip showing the previous answer.
+ */
+async function refreshRouterHealth({ force = false } = {}) {
+  const now = Date.now();
+  if (!force && state.routerProbedAt && now - state.routerProbedAt < 5 * 60_000) return state.routerHealth;
+  const providers = [];
+  for (const id of ['kilo', 'opencode']) {
+    const meta = PROVIDERS[id];
+    if (meta) providers.push({ id, baseUrl: meta.baseUrl, key: state.settings.keys?.[id]?.key || '' });
+  }
+  for (const [id, entry] of Object.entries(state.settings.keys || {})) {
+    if (entry?.key && PROVIDERS[id] && !PROVIDERS[id].offline) providers.push({ id, baseUrl: PROVIDERS[id].baseUrl, key: entry.key });
+  }
+  try {
+    state.routerHealth = await probeModels(providers);
+  } catch {
+    state.routerHealth = { state: 'unknown', providers: [], liveCount: 0, checkedAt: now };
+  }
+  state.routerProbedAt = Date.now();
+  paintRouterHealth();
+  return state.routerHealth;
+}
+
+function paintRouterHealth() {
+  const chip = $('#status-router');
+  if (!chip) return;
+  const report = describeProbe(state.routerHealth);
+  chip.hidden = !state.routerHealth;
+  chip.dataset.tone = report.tone;
+  chip.textContent = report.label;
+  const pill = $('#status-pill');
+  if (pill) pill.title = `${report.detail}`.trim();
+}
 
 function renderChrome() {
   const modelName = state.model.split('/').pop();
@@ -3261,6 +3463,8 @@ async function deployToProvider(provider) {
   }
   try {
     const result = await doDeploy(provider, { projectName: state.project?.name });
+    // doDeploy reports its own blockers and returns without pushing.
+    if (!result?.ok) return;
     toast(result.repo ? `Pushed to ${result.repo}` : 'Done', 'ok');
   } catch (err) {
     toast(err.message, 'err', 6000);
@@ -3273,4 +3477,4 @@ boot().catch((err) => {
 });
 
 // Exposed for the DOM test harness.
-window.__alphacode = { state, send, handleEvent, setView, send2: send };
+window.__alphacode = { state, send, handleEvent, setView, send2: send, resume: resumeTurn, refreshPreview };

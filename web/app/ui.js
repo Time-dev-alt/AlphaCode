@@ -23,8 +23,47 @@ export function el(tag, props = {}, children = []) {
 export const escapeHtml = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-export const icon = (name, size = 14) =>
-  `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ICONS.dot}</svg>`;
+export const icon = (name, size = 14, cls = '') =>
+  `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"${cls ? ` class="${cls}"` : ''}>${ICONS[name] || ICONS.dot}</svg>`;
+
+/** Does this icon exist? Lets callers fall back deliberately instead of silently. */
+export const hasIcon = (name) => Object.prototype.hasOwnProperty.call(ICONS, name);
+
+/**
+ * The glyph for a file, by extension.
+ *
+ * A tree of identical page outlines is hard to scan; a colour and a shape per
+ * language is how every editor people already use does it.
+ */
+const FILE_ICONS = [
+  [/\.(js|mjs|cjs|jsx)$/i, 'file-code', 'js'],
+  [/\.(ts|tsx)$/i, 'file-code', 'ts'],
+  [/\.html?$/i, 'file-html', 'html'],
+  [/\.(css|scss|sass|less)$/i, 'file-css', 'css'],
+  [/\.json$/i, 'file-json', 'json'],
+  [/\.(md|mdx|txt|rst)$/i, 'file-text', 'text'],
+  [/\.(png|jpe?g|gif|svg|webp|avif|ico|bmp)$/i, 'file-image', 'image'],
+  [/\.(zip|gz|tar|tgz|br|7z|rar)$/i, 'file-archive', 'archive'],
+  [/\.(wasm|node)$/i, 'file-binary', 'binary'],
+  [/\.(woff2?|ttf|otf|eot)$/i, 'file-font', 'font'],
+  [/\.(lock|lockb)$|^package-lock\.json$/i, 'file-lock', 'lock'],
+  [/\.(ya?ml|toml|ini|env|conf|config)$/i, 'file-config', 'config'],
+  [/\.(db|sqlite3?|sql)$/i, 'file-db', 'db'],
+  [/\.py$/i, 'file-code', 'py'],
+  [/\.(sh|bash|zsh|fish)$/i, 'terminal', 'shell'],
+];
+
+export function fileIconPath(path) {
+  const name = String(path ?? '').split('/').pop();
+  for (const [re, glyph, kind] of FILE_ICONS) if (re.test(name)) return { glyph, kind };
+  return { glyph: 'file', kind: 'file' };
+}
+
+/** `<span class="ft ft-js">svg</span>` — a tinted file glyph for the tree. */
+export const fileIcon = (path, size = 14) => {
+  const { glyph, kind } = fileIconPath(path);
+  return `<span class="ft ft-${kind}">${icon(glyph, size)}</span>`;
+};
 
 /** An icon as a DOM node (for places that build elements instead of strings). */
 export const iconEl = (name, size = 14) => {
@@ -114,6 +153,57 @@ const ICONS = {
   git: '<circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="12" r="2.5"/><path d="M6 8.5v7M8.5 6H14a4 4 0 0 1 4 4v.5"/>',
   type: '<path d="M5 6.5V5h14v1.5M12 5v14M9 19h6"/>',
   layout: '<rect x="3.5" y="3.5" width="17" height="17" rx="3"/><path d="M3.5 9.5h17M9.5 9.5v11"/>',
+
+  /* --- file types: the same page outline, a different mark inside --------- */
+  'file-code': '<path d="M14 3.5H7A1.5 1.5 0 0 0 5.5 5v14A1.5 1.5 0 0 0 7 20.5h10a1.5 1.5 0 0 0 1.5-1.5V8z"/><path d="M14 3.5V8h4.5"/><path d="m10.6 12.4-1.7 1.9 1.7 1.9M14 12.4l1.7 1.9-1.7 1.9"/>',
+  'file-html': '<path d="M14 3.5H7A1.5 1.5 0 0 0 5.5 5v14A1.5 1.5 0 0 0 7 20.5h10a1.5 1.5 0 0 0 1.5-1.5V8z"/><path d="M14 3.5V8h4.5"/><path d="m9.6 12.6-1.5 1.8 1.5 1.8M14.4 12.6l1.5 1.8-1.5 1.8M12.6 12.2l-1.2 4.6"/>',
+  'file-css': '<path d="M14 3.5H7A1.5 1.5 0 0 0 5.5 5v14A1.5 1.5 0 0 0 7 20.5h10a1.5 1.5 0 0 0 1.5-1.5V8z"/><path d="M14 3.5V8h4.5"/><path d="M10 13h4M10 16h4M11 11.6 10 17.4M14.2 11.6 13.2 17.4"/>',
+  'file-json': '<path d="M14 3.5H7A1.5 1.5 0 0 0 5.5 5v14A1.5 1.5 0 0 0 7 20.5h10a1.5 1.5 0 0 0 1.5-1.5V8z"/><path d="M14 3.5V8h4.5"/><path d="M10.4 12.4c-.8 0-1 .4-1 1.2v1c0 .7-.4 1-1 1 .6 0 1 .3 1 1v1c0 .8.2 1.2 1 1.2M13.6 12.4c.8 0 1 .4 1 1.2v1c0 .7.4 1 1 1-.6 0-1 .3-1 1v1c0 .8-.2 1.2-1 1.2"/>',
+  'file-text': '<path d="M14 3.5H7A1.5 1.5 0 0 0 5.5 5v14A1.5 1.5 0 0 0 7 20.5h10a1.5 1.5 0 0 0 1.5-1.5V8z"/><path d="M14 3.5V8h4.5"/><path d="M8.6 12.6h6.8M8.6 15.2h6.8M8.6 17.8h4.2"/>',
+  'file-image': '<path d="M14 3.5H7A1.5 1.5 0 0 0 5.5 5v14A1.5 1.5 0 0 0 7 20.5h10a1.5 1.5 0 0 0 1.5-1.5V8z"/><path d="M14 3.5V8h4.5"/><circle cx="10.2" cy="12.6" r="1.1"/><path d="m8.2 18 3-3 1.8 1.7 2.2-2.4 1.6 1.8"/>',
+  'file-archive': '<path d="M14 3.5H7A1.5 1.5 0 0 0 5.5 5v14A1.5 1.5 0 0 0 7 20.5h10a1.5 1.5 0 0 0 1.5-1.5V8z"/><path d="M14 3.5V8h4.5"/><path d="M11 8.5h2M11 10.8h2M11 13.1h2M11 15.4h2"/><rect x="10.4" y="16.8" width="3.2" height="2.6" rx="0.9"/>',
+  'file-lock': '<path d="M14 3.5H7A1.5 1.5 0 0 0 5.5 5v14A1.5 1.5 0 0 0 7 20.5h10a1.5 1.5 0 0 0 1.5-1.5V8z"/><path d="M14 3.5V8h4.5"/><rect x="9.4" y="13.4" width="5.4" height="4.2" rx="1.2"/><path d="M10.5 13.4v-1a1.6 1.6 0 0 1 3.2 0v1"/>',
+  'file-config': '<path d="M14 3.5H7A1.5 1.5 0 0 0 5.5 5v14A1.5 1.5 0 0 0 7 20.5h10a1.5 1.5 0 0 0 1.5-1.5V8z"/><path d="M14 3.5V8h4.5"/><circle cx="12" cy="15" r="1.7"/><path d="M12 11.8v1M12 17.2v1M8.9 13.2l.9.6M14.2 16.2l.9.6M15.1 13.2l-.9.6M9.8 16.2l-.9.6"/>',
+  'file-binary': '<path d="M14 3.5H7A1.5 1.5 0 0 0 5.5 5v14A1.5 1.5 0 0 0 7 20.5h10a1.5 1.5 0 0 0 1.5-1.5V8z"/><path d="M14 3.5V8h4.5"/><path d="M9.4 12.4h1.5v4.8H9.4M13 12.4h1.6v4.8H13"/>',
+  'file-font': '<path d="M14 3.5H7A1.5 1.5 0 0 0 5.5 5v14A1.5 1.5 0 0 0 7 20.5h10a1.5 1.5 0 0 0 1.5-1.5V8z"/><path d="M14 3.5V8h4.5"/><path d="M9.8 17 12 12l2.2 5M10.6 15.4h2.8"/>',
+  'file-db': '<path d="M14 3.5H7A1.5 1.5 0 0 0 5.5 5v14A1.5 1.5 0 0 0 7 20.5h10a1.5 1.5 0 0 0 1.5-1.5V8z"/><path d="M14 3.5V8h4.5"/><ellipse cx="12" cy="12.6" rx="2.6" ry="1.1"/><path d="M9.4 12.6v4c0 .6 1.2 1.1 2.6 1.1s2.6-.5 2.6-1.1v-4"/>',
+
+  /* --- workspace: folders you own, drives, connections ------------------- */
+  'folder-plus': '<path d="M3.5 7.5A2 2 0 0 1 5.5 5.5h3.7l2 2h7.3a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/><path d="M12 11.6v4.4M9.8 13.8h4.4"/>',
+  'folder-sync': '<path d="M3.5 7.5A2 2 0 0 1 5.5 5.5h3.7l2 2h7.3a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/><path d="M9.4 15.6a2.7 2.7 0 0 1 4.6-1.2l.6.6M14.6 12.9a2.7 2.7 0 0 1-4.6 1.2l-.6-.6"/><path d="M14.6 13.4v1.6h-1.6M9.4 15.9v-1.6h1.6"/>',
+  'hard-drive': '<rect x="2.5" y="13" width="19" height="7" rx="2.4"/><path d="M5.4 13 8 4.8h8L18.6 13"/><path d="M6.5 16.5h.01M10 16.5h.01"/>',
+  plug: '<path d="M9 3.5v5M15 3.5v5"/><path d="M6.5 8.5h11v2.2a5.5 5.5 0 0 1-11 0z"/><path d="M12 16.2v4.3"/>',
+  unplug: '<path d="M8.6 4.5v4.2M15.4 4.5v4.2"/><path d="M6.6 8.7h10.8v2.1a5.4 5.4 0 0 1-10.8 0z"/><path d="M12 16.2v3.3"/><path d="m4 4 16 16"/>',
+  save: '<path d="M5.5 4.5h10L19.5 8.5v11a1.5 1.5 0 0 1-1.5 1.5H5.5A1.5 1.5 0 0 1 4 19.5v-13a2 2 0 0 1 1.5-2z"/><path d="M8.5 4.5v5h7v-5"/><rect x="8" y="13" width="8" height="6" rx="1"/>',
+  copy: '<rect x="8.5" y="8.5" width="11" height="11" rx="2.2"/><path d="M15.5 8.5v-2a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2"/>',
+  layers: '<path d="m12 3.5 8.5 4.2-8.5 4.3L3.5 7.7z"/><path d="m3.5 12.2 8.5 4.3 8.5-4.3M3.5 16.5l8.5 4.3 8.5-4.3"/>',
+  box: '<path d="m12 3 8 4.3v9.4L12 21l-8-4.3V7.3z"/><path d="m4 7.3 8 4.3 8-4.3M12 11.6V21"/>',
+  boxes: '<path d="m7.5 2.8 4 2.1v4.6l-4 2.1-4-2.1V4.9z"/><path d="m16.5 2.8 4 2.1v4.6l-4 2.1-4-2.1V4.9z"/><path d="m12 12.4 4 2.1v4.6l-4 2.1-4-2.1v-4.6z"/>',
+  command: '<path d="M9 6.5a2.5 2.5 0 1 0-2.5 2.5H17a2.5 2.5 0 1 1-2.5-2.5v11a2.5 2.5 0 1 0 2.5-2.5H7a2.5 2.5 0 1 1 2.5 2.5"/>',
+  activity: '<path d="M3 12h3.5L9.5 5l4.5 14 2.5-7H21"/>',
+  gauge: '<path d="M4 17.5a9 9 0 1 1 16 0"/><path d="m12 13.5 3.8-3.4"/><circle cx="12" cy="14.6" r="1.5"/>',
+  branch: '<circle cx="7" cy="5.5" r="2.2"/><circle cx="7" cy="18.5" r="2.2"/><circle cx="17" cy="9" r="2.2"/><path d="M7 7.7v8.6M17 11.2c0 3.2-2.6 4-5.4 5.6"/>',
+  commit: '<circle cx="12" cy="12" r="3.4"/><path d="M12 3v5.6M12 15.4V21"/>',
+  diff: '<path d="M6 4.5v15M18 4.5v6M18 15.5v4"/><path d="M14.5 9.5h7M14.5 13h7"/><circle cx="6" cy="12" r="2"/>',
+  keyboard: '<rect x="2.5" y="6.5" width="19" height="11" rx="2.2"/><path d="M6 10h.01M9.3 10h.01M12.6 10h.01M15.9 10h.01M18.2 10h.01M6 13.4h.01M18.2 13.4h.01M8.6 16.2h6.8"/>',
+  crosshair: '<circle cx="12" cy="12" r="8"/><path d="M12 2.5v4M12 17.5v4M2.5 12h4M17.5 12h4"/>',
+  route: '<circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="6" r="2.4"/><path d="M8.4 18h4.1a3 3 0 0 0 0-6H10a3 3 0 0 1 0-6h5.6"/>',
+  signal: '<path d="M4 20v-4M9.3 20v-7M14.7 20V9.5M20 20V5"/>',
+  hash: '<path d="M9.4 3.5 7.6 20.5M16.4 3.5l-1.8 17M3.8 8.7h16.4M3 15.3h16.4"/>',
+  brackets: '<path d="M8.5 3.5H5.8A1.3 1.3 0 0 0 4.5 4.8v14.4a1.3 1.3 0 0 0 1.3 1.3h2.7M15.5 3.5h2.7a1.3 1.3 0 0 1 1.3 1.3v14.4a1.3 1.3 0 0 1-1.3 1.3h-2.7"/>',
+  undo: '<path d="M4 8.5h9.5a5.5 5.5 0 0 1 0 11H9"/><path d="M7.5 4.5 4 8.5l3.5 4"/>',
+  redo: '<path d="M20 8.5h-9.5a5.5 5.5 0 0 0 0 11H15"/><path d="M16.5 4.5 20 8.5l-3.5 4"/>',
+  filter: '<path d="M3.5 5.5h17l-6.6 7.6v6.4l-3.8-2v-4.4z"/>',
+  star: '<path d="m12 3.6 2.6 5.4 5.9.8-4.3 4.1 1.1 5.8-5.3-2.9-5.3 2.9 1.1-5.8L3.5 9.8l5.9-.8z"/>',
+  pin: '<path d="M9 3.5h6l-1 5.5 3.5 3.5h-11L10 9z"/><path d="M12 12.5V21"/>',
+  bell: '<path d="M6.5 10a5.5 5.5 0 0 1 11 0c0 3.4.9 4.9 1.7 5.7H4.8c.8-.8 1.7-2.3 1.7-5.7z"/><path d="M10.2 19a2 2 0 0 0 3.6 0"/>',
+  'cloud-up': '<path d="M17.5 18a4.5 4.5 0 0 0 .5-9 6 6 0 0 0-11.6 1.5A3.75 3.75 0 0 0 7 18"/><path d="M12 21v-7M9.4 16.4 12 13.8l2.6 2.6"/>',
+  'cloud-down': '<path d="M17.5 18a4.5 4.5 0 0 0 .5-9 6 6 0 0 0-11.6 1.5A3.75 3.75 0 0 0 7 18"/><path d="M12 14v7M9.4 18.4 12 21l2.6-2.6"/>',
+  'shield-check': '<path d="M12 3 5 5.8v5.6c0 4 2.9 7.2 7 9.6 4.1-2.4 7-5.6 7-9.6V5.8z"/><path d="m8.8 11.8 2.3 2.3 4.1-4.3"/>',
+  scan: '<path d="M3.5 8.5v-3a2 2 0 0 1 2-2h3M15.5 3.5h3a2 2 0 0 1 2 2v3M20.5 15.5v3a2 2 0 0 1-2 2h-3M8.5 20.5h-3a2 2 0 0 1-2-2v-3"/><path d="M3.5 12h17"/>',
+  inspect: '<rect x="3.5" y="3.5" width="10" height="10" rx="2.2"/><circle cx="16" cy="16" r="4.2"/><path d="m19 19 2 2"/>',
+  wrench: '<path d="M15.6 3.9a5.2 5.2 0 0 0-6.7 6.7l-5 5a2.1 2.1 0 0 0 3 3l5-5a5.2 5.2 0 0 0 6.7-6.7l-3 3-2.4-2.4z"/>',
+  image: '<rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="10" r="1.6"/><path d="m4.5 17.5 4.6-4.1 3 2.6 3.2-3.4 4.2 4.4"/>',
 };
 
 export function paintIcons(root = document) {

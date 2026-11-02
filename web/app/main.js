@@ -15,6 +15,7 @@ import { Harness, Run } from '../engine/harness.js';
 import { FREE_MODELS, PROVIDERS, GUEST_MODEL } from '../engine/providers.js';
 import { runPython, pipInstall, loadPython, pythonReady } from '../engine/python.js';
 import { createNodeSession } from '../engine/node/session.js';
+import { nodepodStatus, NODEPOD_VERSION } from '../engine/node/nodepod.js';
 import { JobManager } from '../engine/jobs.js';
 import { loadHooks } from '../engine/hooks.js';
 import { runWasi, compileC, canCompileC, RUNTIME_MATRIX } from '../engine/native.js';
@@ -22,7 +23,21 @@ import { connectAll, contentToText } from '../engine/mcp.js';
 import { mountWorkspace, refreshPreview, renderJobs, renderHistory, setLayout, setMobilePane, pickAttachment, setPromptValue } from './workspace.js';
 import { zipSync, download } from '../engine/zip.js';
 import { TerminalView } from '../../public/assets/term.js';
-import { mountFiles, refreshFileTree, openFile, saveActiveFile, downloadProjectZip, pickFiles } from './files.js';
+import {
+  mountFiles,
+  refreshFileTree,
+  openFile,
+  saveActiveFile,
+  downloadProjectZip,
+  pickFiles,
+  newFile,
+  importRepo,
+  mountFolder,
+  resumeMount,
+  unmountFolder,
+  syncMount,
+  mountInfo,
+} from './files.js';
 import {
   mountActivity,
   resetActivity,
@@ -219,11 +234,17 @@ function commands() {
     { group: 'Actions', name: 'Send message', icon: 'arrow-up', sub: '⌘↵', run: async () => { close(); send($('#prompt').value); } },
     { group: 'Actions', name: 'Attach a file', icon: 'paperclip', run: async () => { close(); $('#btn-attach').click(); } },
     { group: 'Files', name: 'Export project as a ZIP', icon: 'download', sub: 'files', run: async () => { close(); setView('files'); downloadProjectZip(); } },
-    { group: 'Files', name: 'New file', icon: 'plus', run: async () => { close(); setView('files'); $('#btn-new-file').click(); } },
+    { group: 'Files', name: 'New file', icon: 'plus', run: async () => { close(); setView('files'); newFile(); } },
     { group: 'Files', name: 'Upload files', icon: 'upload', run: async () => { close(); setView('files'); pickFiles(); } },
-    { group: 'Files', name: 'Import a GitHub repository', icon: 'github', run: async () => { close(); setView('files'); $('#btn-import-repo').click(); } },
+    { group: 'Files', name: 'Mount a folder from this computer', icon: 'folder-plus', run: async () => { close(); setView('files'); mountFolder(); } },
+    { group: 'Files', name: 'Sync the mounted folder now', icon: 'folder-sync', run: async () => { close(); setView('files'); syncMount('pull'); } },
+    { group: 'Files', name: 'Write the project into the mounted folder', icon: 'hard-drive', run: async () => { close(); setView('files'); syncMount('push'); } },
+    { group: 'Files', name: 'Disconnect the mounted folder', icon: 'unplug', run: async () => { close(); unmountFolder(); } },
+    { group: 'Files', name: 'Import a GitHub repository', icon: 'github', run: async () => { close(); setView('files'); importRepo(); } },
+    { group: 'Files', name: 'Install packages (npm install)', icon: 'package', run: async () => { close(); runNpmInstall(); } },
     { group: 'Files', name: 'Save the open file', icon: 'check', sub: '⌘S', run: async () => { close(); saveActiveFile(); } },
     { group: 'Actions', name: 'Focus the terminal', icon: 'terminal', run: async () => { close(); setView('terminal'); focusTerminal(); } },
+    { group: 'Actions', name: 'Show installed packages', icon: 'boxes', run: async () => { close(); setView('terminal'); focusTerminal(); runShellLine('npm ls'); } },
     { group: 'Actions', name: 'Export every project as JSON', icon: 'download', run: async () => { close(); exportProject(); } },
     { group: 'Actions', name: 'Toggle theme', icon: currentTheme() === 'light' ? 'moon' : 'sun', sub: '⌘⇧L', run: async () => { close(); toggleTheme(); } },
     { group: 'Actions', name: 'Runtime status', icon: 'cpu', run: async () => { close(); renderRuntimePanel(); } },
@@ -403,6 +424,14 @@ async function boot() {
     ask: (opts) => askText(opts),
     confirm: (opts) => askConfirm(opts),
     onFilesChanged: () => refreshFiles(),
+    runCommand: async (line) => {
+      setView('terminal');
+      const run = async () => {
+        const { output } = await state.shell.run(line, { onOutput: (chunk) => state.termView?.write?.(chunk.replace(/\n/g, '\r\n')) });
+        return output;
+      };
+      return run();
+    },
   });
   mountActivity();
   trackTranscriptScroll();
@@ -527,6 +556,8 @@ async function createProject(name, { silent, files = null } = {}) {
     onStdout: (text) => state.termView?.write?.(text),
     onStderr: (text) => state.termView?.write?.(text),
     env: { NODE_ENV: 'development' },
+    npmEngine: state.settings?.npmEngine || 'builtin',
+    npmRegistry: state.settings?.npmRegistry || '',
   });
   attachShell();
   await renderSessions();
@@ -635,8 +666,14 @@ async function openProject(id) {
     projectId: id,
     onStdout: (text) => state.termView?.write?.(text),
     onStderr: (text) => state.termView?.write?.(text),
+    npmEngine: state.settings?.npmEngine || 'builtin',
+    npmRegistry: state.settings?.npmRegistry || '',
   });
   attachShell();
+  // A folder this project was mounted to reconnects without a click when the
+  // browser still remembers the permission.
+  await resumeMount().catch(() => {});
+  refreshFileTree().catch(() => {});
   $('#project-name').textContent = state.project.name;
   state.hooks = await loadHooks({ fs: state.fs, projectId: id, settings: state.settings }).catch(() => null);
   await loadMcp();
@@ -1451,6 +1488,34 @@ function bindTermKeys() {
   window.addEventListener('alphacode:term-focus', () => focusTerminal());
 }
 
+/** Run a command from the UI (menu, dependency card) as if it were typed. */
+async function runShellLine(line) {
+  if (!state.shell) return '';
+  setView('terminal');
+  mountTerminal();
+  const view = state.termView;
+  view?.write(`${line}\r\n`);
+  const { output } = await state.shell.run(line, {
+    onOutput: (chunk) => view?.write(chunk.replace(/\n/g, '\r\n')),
+  });
+  if (output && !output.endsWith('\n')) view?.write('\r\n');
+  prompt();
+  await refreshFiles();
+  refreshFileTree().catch(() => {});
+  return output;
+}
+
+/** "Install whatever package.json asks for" — the missing button, in words. */
+async function runNpmInstall(extra = []) {
+  const line = `npm install${extra.length ? ` ${extra.join(' ')}` : ''}`;
+  const toastId = toast('Installing packages…', 'info', 2000);
+  const output = await runShellLine(line);
+  const failed = /npm ERR!/.test(output || '');
+  toast(failed ? 'npm install failed — see the terminal' : 'Packages installed into this project', failed ? 'err' : 'ok', 4200);
+  refreshFileTree().catch(() => {});
+  return { output, failed, toastId };
+}
+
 function prompt() {
   const cwd = state.shell?.cwd || '';
   state.termView.write(`\u001b[1;32m/${cwd || ''}\u001b[0m \u001b[1;34m$\u001b[0m `);
@@ -1667,6 +1732,18 @@ async function handleClaimRoute() {
 
 /* -------------------------------------------------------------- settings --- */
 
+/** Report whether the vendored full engine is actually on this deployment. */
+async function refreshNpmEngineState() {
+  const node = document.querySelector('#npm-engine-state');
+  if (!node) return;
+  node.textContent = 'checking the full engine…';
+  const status = await nodepodStatus();
+  node.className = `hint ${status.available ? 'ok' : 'dim'}`;
+  node.textContent = status.available
+    ? `Full engine available — Nodepod ${status.version}, loaded on first use (≈5 MB, cached).`
+    : `Full engine not deployed (${status.reason}). The built-in resolver keeps working.`;
+}
+
 function openSettings() {
   const body = $('#modal-body');
   const heading = $('#modal-title');
@@ -1746,6 +1823,27 @@ function openSettings() {
     </section>
 
     <section>
+      <h3>Packages &amp; npm</h3>
+      <p class="hint">Installs run in this tab and land in the project — and in a mounted folder. The built-in resolver is fast and dependency-light; the full engine does what <code>npm install</code> does on a laptop.</p>
+      <div class="field"><label>Install engine</label>
+        <select id="set-npm-engine">
+          <option value="builtin" ${(state.settings.npmEngine || 'builtin') === 'builtin' ? 'selected' : ''}>Built-in — fast resolver, registry only</option>
+          <option value="nodepod" ${state.settings.npmEngine === 'nodepod' ? 'selected' : ''}>Full npm — Nodepod (semver ranges, transitive, dev + optional, workspaces)</option>
+        </select>
+        <div class="hint" id="npm-engine-state">checking the full engine…</div>
+      </div>
+      <div class="field"><label>Registry</label>
+        <input type="url" id="set-npm-registry" placeholder="https://registry.npmjs.org" value="${escapeHtml(state.settings.npmRegistry || '')}" spellcheck="false">
+        <div class="hint">Leave blank for the public registry. A mirror or a private registry&#39;s read URL works too.</div>
+      </div>
+      <div class="row">
+        <button class="btn" id="set-npm-install">${icon('package', 14)} npm install</button>
+        <button class="btn" id="set-npm-list">${icon('boxes', 14)} Installed packages</button>
+      </div>
+      <div class="hint">Missing the full engine? Run <code>npm run vendor:nodepod</code> and rebuild — it is not committed because it is 5 MB of someone else's code.</div>
+    </section>
+
+    <section>
       <h3>MCP servers</h3>
       <p class="hint">Connect remote MCP servers (Gemini, Claude, GitHub, Linear…). Their tools appear to the agent as <code>mcp__server__tool</code>. Requests go straight from this browser to the server.</p>
       <div id="mcp-list">${(state.settings.mcp || [])
@@ -1783,6 +1881,36 @@ function openSettings() {
         <button class="btn danger" id="set-wipe">Delete everything</button>
       </div>
     </section>`;
+
+  const engineSelect = $('#set-npm-engine');
+  if (engineSelect) {
+    engineSelect.onchange = async () => {
+      state.settings.npmEngine = engineSelect.value;
+      await state.store.saveSettings({ npmEngine: engineSelect.value });
+      if (state.node) state.node.npmEngine = engineSelect.value;
+      toast(engineSelect.value === 'nodepod' ? 'npm will use the full engine' : 'npm will use the built-in resolver', 'info', 3200);
+      refreshNpmEngineState();
+    };
+    refreshNpmEngineState();
+  }
+  const registryInput = $('#set-npm-registry');
+  if (registryInput) {
+    registryInput.onchange = async () => {
+      const value = registryInput.value.trim().replace(/\/+$/, '');
+      state.settings.npmRegistry = value;
+      await state.store.saveSettings({ npmRegistry: value });
+      if (state.node) state.node.npmRegistry = value;
+      toast(value ? `npm will use ${value}` : 'npm will use the public registry', 'info', 3400);
+    };
+  }
+  $('#set-npm-install')?.addEventListener('click', () => {
+    $('#modal').hidden = true;
+    runNpmInstall();
+  });
+  $('#set-npm-list')?.addEventListener('click', () => {
+    $('#modal').hidden = true;
+    runShellLine('npm ls');
+  });
 
   $('#set-export').onclick = exportAll;
   $('#set-wipe').onclick = async () => {

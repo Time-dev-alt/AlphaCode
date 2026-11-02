@@ -7,10 +7,20 @@
  * create, rename, delete, upload, download, import a ZIP, edit without losing
  * changes, and see what the agent changed underneath them.
  */
-import { $, el, icon, escapeHtml, bytes, toast } from './ui.js';
+import { $, el, icon, fileIcon, escapeHtml, bytes, toast, timeAgo } from './ui.js';
 import { isBinaryPath } from '../engine/fs.js';
 import { zipSync, download } from '../engine/zip.js';
 import { unzipSync } from 'fflate';
+import {
+  supportsFolderMount,
+  pickFolder,
+  FolderMount,
+  saveMountHandle,
+  loadMountHandle,
+  clearMountHandle,
+  filesFromDrop,
+  MOUNT_LIMITS,
+} from '../engine/mount.js';
 
 const deps = {};
 const state = {
@@ -19,6 +29,11 @@ const state = {
   active: null,
   filter: '',
   lastClick: null,
+  modulesOpen: false, // node_modules folded in the tree
+  depsOpen: false, // dependency card expanded
+  mount: null, // FolderMount
+  mountInfo: null,
+  mountSyncing: null,
 };
 
 const TEXT_LIMIT = 1_500_000;
@@ -49,14 +64,23 @@ export async function refreshFileTree({ keepOpen = true } = {}) {
   if (!keepOpen) state.open = [];
   renderTree();
   renderTabs();
+  renderMountBar();
+  renderDependencies();
   syncOpenWithDisk();
 }
+
+/* ----------------------------------------------------------- file tree ---- */
 
 function renderTree() {
   const host = $('#file-tree');
   if (!host) return;
   const query = state.filter.trim().toLowerCase();
-  const files = state.files.filter((f) => !query || f.path.toLowerCase().includes(query));
+  const matches = (path) => !query || path.toLowerCase().includes(query);
+
+  // node_modules is thousands of files nobody wants to scroll; it gets one
+  // row with a package count, and a click opens the package list.
+  const modules = state.files.filter((f) => f.path.startsWith('node_modules/') && matches(f.path));
+  const files = state.files.filter((f) => !f.path.startsWith('node_modules/') && matches(f.path));
   host.innerHTML = '';
 
   if (!state.files.length) {
@@ -67,16 +91,16 @@ function renderTree() {
       <div class="tree-empty-actions">
         <button class="btn sm" data-empty-new>${icon('plus', 13)} New file</button>
         <button class="btn sm" data-empty-upload>${icon('upload', 13)} Upload</button>
-        <button class="btn sm" data-empty-repo>${icon('github', 13)} Import repo</button>
+        <button class="btn sm" data-empty-mount>${icon('folder-plus', 13)} Mount a folder</button>
       </div>
     </div>`;
     host.querySelector('[data-empty-new]').onclick = () => newFile();
     host.querySelector('[data-empty-upload]').onclick = () => pickFiles();
-    host.querySelector('[data-empty-repo]').onclick = () => importRepo();
+    host.querySelector('[data-empty-mount]').onclick = () => mountFolder();
     return;
   }
 
-  if (!files.length) {
+  if (!files.length && !modules.length) {
     host.innerHTML = `<div class="tree-empty"><p>Nothing matches “${escapeHtml(state.filter)}”.</p></div>`;
     return;
   }
@@ -93,23 +117,65 @@ function renderTree() {
 
   for (const group of sortedGroups) {
     if (group) {
-      const head = el('div', { class: 'tree-group', html: `${icon('folder', 12)}<span>${escapeHtml(group)}</span>` });
+      const head = el('div', { class: 'tree-group', html: `${icon('folder-open', 12)}<span>${escapeHtml(group)}</span><span class="tree-count">${groups.get(group).length}</span>` });
       host.append(head);
     }
     for (const file of groups.get(group).sort((a, b) => a.path.localeCompare(b.path))) {
       host.append(treeNode(file, group ? 1 : 0));
     }
   }
+
+  if (modules.length) host.append(modulesRow(modules));
+  if (!files.length && query) {
+    host.insertAdjacentHTML('afterbegin', `<div class="tree-empty small"><p>No project file matches “${escapeHtml(state.filter)}”.</p></div>`);
+  }
 }
 
+/** The folded `node_modules` row and the package list behind it. */
+function modulesRow(modules) {
+  const packages = new Map();
+  for (const file of modules) {
+    const parts = file.path.split('/');
+    const name = parts[1]?.startsWith('@') ? `${parts[1]}/${parts[2] || ''}` : parts[1];
+    if (!name) continue;
+    packages.set(name, (packages.get(name) || 0) + 1);
+  }
+  const wrap = el('div', { class: 'tree-modules' });
+  const row = el('div', { class: 'tree-row module-head', role: 'button', tabindex: '0' });
+  row.innerHTML = `${icon(state.modulesOpen ? 'chevron-down' : 'chevron-right', 12)}
+    <span class="ft ft-modules">${icon('boxes', 13)}</span>
+    <span class="path">node_modules</span>
+    <span class="tree-count">${packages.size} package${packages.size === 1 ? '' : 's'}</span>`;
+  row.onclick = () => {
+    state.modulesOpen = !state.modulesOpen;
+    renderTree();
+  };
+  row.onkeydown = (event) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      row.click();
+    }
+  };
+  wrap.append(row);
+
+  if (state.modulesOpen) {
+    for (const [name, count] of [...packages].sort((a, b) => a[0].localeCompare(b[0]))) {
+      const item = el('div', { class: 'tree-row module-row' });
+      item.innerHTML = `${icon('package', 12)}<span class="path">${escapeHtml(name)}</span><span class="size">${count}</span>`;
+      item.title = `${name} — ${count} file${count === 1 ? '' : 's'}`;
+      item.onclick = () => openFile(`node_modules/${name}/package.json`);
+      wrap.append(item);
+    }
+  }
+  return wrap;
+}
 function treeNode(file, depth) {
   const name = file.path.split('/').pop();
   const row = el('div', {
     class: `tree-row ${file.path === state.active ? 'active' : ''} ${file.path === state.lastClick ? 'flash' : ''}`,
   });
   row.style.paddingLeft = `${8 + depth * 10}px`;
-  const binary = isBinaryPath(file.path);
-  row.innerHTML = `${icon(binary ? 'package' : 'file', 13)}<span class="path">${escapeHtml(name)}</span><span class="size">${bytes(file.size || 0)}</span>
+  row.innerHTML = `${fileIcon(file.path, 13)}<span class="path">${escapeHtml(name)}</span><span class="size">${bytes(file.size || 0)}</span>
     <button class="tree-more" title="File actions" aria-label="Actions for ${escapeHtml(name)}">${icon('more', 13)}</button>`;
   row.onclick = (event) => {
     if (event.target.closest('.tree-more')) return;
@@ -731,9 +797,327 @@ function bindDragDrop() {
     const files = [...event.dataTransfer.files];
     const zip = files.find((f) => f.name.toLowerCase().endsWith('.zip'));
     if (zip && files.length === 1) return importZipFile(zip);
+
+    // A dropped folder arrives as an entry, not as File objects.
+    const dropped = await filesFromDrop(event.dataTransfer).catch(() => []);
+    const folders = dropped.filter((entry) => entry.path.includes('/'));
+    if (folders.length) {
+      const app = deps.getState();
+      // Drop the shared top folder so `index.html` lands at the root, the way
+      // an import is expected to behave.
+      const roots = new Set(folders.map((entry) => entry.path.split('/')[0]));
+      const strip = roots.size === 1 ? `${[...roots][0]}/` : '';
+      const progress = showImportProgress([...roots][0] || 'folder');
+      let written = 0;
+      for (const [index, entry] of folders.entries()) {
+        const path = strip && entry.path.startsWith(strip) ? entry.path.slice(strip.length) : entry.path;
+        if (!path) continue;
+        progress.set(index + 1, folders.length, path);
+        try {
+          await app.fs.write(app.project.id, path, isBinaryPath(path) ? new Uint8Array(await entry.file.arrayBuffer()) : await entry.file.text());
+          written += 1;
+        } catch (err) {
+          console.warn('drop skip', path, err);
+        }
+      }
+      progress.done(written);
+      await refreshFileTree();
+      deps.onFilesChanged?.({ source: 'drop' });
+      toast(`Added ${written} file${written === 1 ? '' : 's'} from that folder`, 'ok', 4200);
+      return;
+    }
     await uploadFiles(files);
   });
   zone.querySelector('[data-drop-pick]')?.addEventListener('click', () => pickFiles());
+}
+
+/* ----------------------------------------------------------- folder mount -- */
+
+/**
+ * Connect a folder that already exists on this machine.
+ *
+ * The files are copied into the project so everything keeps working offline,
+ * and every write in the app is mirrored back. The folder handle is remembered
+ * in IndexedDB, so the connection survives a reload.
+ */
+export async function mountFolder({ handle: preset = null } = {}) {
+  const app = deps.getState();
+  if (!app?.project) return null;
+  if (!preset && !supportsFolderMount()) {
+    toast('This browser cannot open real folders — Chrome or Edge can. Drag a folder onto the window instead.', 'warn', 7000);
+    return null;
+  }
+  let handle = preset;
+  if (!handle) {
+    try {
+      handle = await pickFolder();
+    } catch (err) {
+      if (err?.name === 'AbortError' || err?.name === 'NotAllowedError') return null;
+      toast(err.message || 'Could not open that folder', 'err', 6000);
+      return null;
+    }
+  }
+  const mount = new FolderMount({
+    fs: app.fs,
+    projectId: app.project.id,
+    handle,
+    onEvent: onMountEvent,
+  });
+  const granted = await mount.ensurePermission({ request: true });
+  if (!granted) {
+    toast('Write access to that folder was declined, so it cannot be mounted.', 'warn', 6000);
+    return null;
+  }
+
+  const ok = await deps.confirm({
+    title: `Mount “${handle.name}”?`,
+    body: `Its files are copied into this project, and changes here are written straight back to the folder. Skip rules keep out node_modules, .git and build output. Up to ${MOUNT_LIMITS.files} files / ${Math.round(MOUNT_LIMITS.bytes / 1024 / 1024)} MB.`,
+    confirm: 'Mount folder',
+  });
+  if (!ok) return null;
+
+  const progress = showImportProgress(handle.name);
+  try {
+    const result = await mount.pullAll({
+      onProgress: ({ path, index, total }) => {
+        if (total) progress.set(index + 1, total, path);
+      },
+    });
+    progress.done(result.written);
+    state.mount = mount;
+    // Remembering the handle is a convenience, not a requirement: some browsers
+    // refuse to clone one (private mode, restricted storage) and the mount
+    // itself must still work for this session.
+    let remembered = true;
+    await saveMountHandle(app.project.id, handle).catch(() => {
+      remembered = false;
+    });
+    mount.watch();
+    state.mountInfo = mount.info();
+    renderMountBar();
+    await refreshFileTree();
+    deps.onFilesChanged?.({ source: 'mount' });
+    toast(
+      `Mounted ${handle.name} — ${result.written} file${result.written === 1 ? '' : 's'} copied${result.truncated ? ' (stopped at the size limit)' : ''}${remembered ? '' : ' · reconnect after a reload'}`,
+      'ok',
+      5200,
+    );
+    return mount;
+  } catch (err) {
+    progress.fail(err.message);
+    toast(`Mount failed: ${err.message}`, 'err', 6000);
+    return null;
+  }
+}
+
+/** Reconnect the folder this project was mounted to, if the browser allows it. */
+export async function resumeMount() {
+  const app = deps.getState();
+  if (!app?.project || state.mount) return null;
+  const handle = await loadMountHandle(app.project.id).catch(() => null);
+  if (!handle) return null;
+  const mount = new FolderMount({ fs: app.fs, projectId: app.project.id, handle, onEvent: onMountEvent });
+  const granted = await mount.ensurePermission({ request: false });
+  state.mount = mount;
+  state.mountInfo = { ...mount.info(), needsPermission: !granted };
+  renderMountBar();
+  if (granted) {
+    mount.watch();
+    await mount.pullChanges().catch(() => {});
+    await refreshFileTree();
+  }
+  return mount;
+}
+
+export async function unmountFolder({ silent = false } = {}) {
+  const app = deps.getState();
+  const mount = state.mount;
+  if (!mount) return;
+  state.mount = null;
+  state.mountInfo = null;
+  try {
+    await mount.flush();
+  } catch {
+    /* pending writes are best-effort */
+  }
+  mount.dispose();
+  if (app?.project) await clearMountHandle(app.project.id).catch(() => {});
+  renderMountBar();
+  if (!silent) toast(`Disconnected ${mount.name}. The files stay in this project.`, 'info', 4200);
+}
+
+export async function syncMount(direction = 'pull') {
+  const mount = state.mount;
+  if (!mount) return null;
+  const granted = await mount.ensurePermission({ request: true });
+  if (!granted) {
+    toast('Permission for that folder expired — reconnect it from the files pane.', 'warn', 6000);
+    renderMountBar();
+    return null;
+  }
+  const progress = showImportProgress(mount.name);
+  try {
+    if (direction === 'push') {
+      const res = await mount.pushAll({ onProgress: ({ path, index, total }) => progress.set(index + 1, total, path) });
+      progress.done(res.written);
+      toast(`Wrote ${res.written} file${res.written === 1 ? '' : 's'} to ${mount.name}`, 'ok', 4200);
+      return res;
+    }
+    const res = await mount.pullChanges({ onProgress: ({ path, index, total }) => progress.set(index + 1, total, path) });
+    progress.done(res.written);
+    await refreshFileTree();
+    deps.onFilesChanged?.({ source: 'mount-pull' });
+    toast(res.written ? `Pulled ${res.written} changed file${res.written === 1 ? '' : 's'} from ${mount.name}` : `${mount.name} is already up to date`, 'ok', 4200);
+    return res;
+  } catch (err) {
+    progress.fail(err.message);
+    toast(err.message, 'err', 5000);
+    return null;
+  }
+}
+
+export function mountInfo() {
+  return state.mount ? { ...state.mount.info(), needsPermission: Boolean(state.mountInfo?.needsPermission) } : null;
+}
+
+function onMountEvent(event) {
+  if (event.type === 'state') {
+    state.mountInfo = state.mount ? state.mount.info() : null;
+    renderMountBar();
+  } else if (event.type === 'mirrored' && state.mount) {
+    state.mountInfo = state.mount.info();
+    renderMountBar();
+  } else if (event.type === 'error') {
+    console.warn('mount', event.path, event.message);
+  }
+}
+
+/** The chip above the file tree: what is connected, and how fresh it is. */
+function renderMountBar() {
+  const host = $('#mount-bar');
+  if (!host) return;
+  const info = state.mount?.info();
+  if (!info) {
+    host.hidden = true;
+    host.innerHTML = '';
+    return;
+  }
+  host.hidden = false;
+  const needs = state.mountInfo?.needsPermission;
+  host.innerHTML = `<div class="mount-chip ${needs ? 'needs' : ''}">
+      <span class="mount-dot ${info.state === 'syncing' ? 'busy' : needs ? 'paused' : 'live'}"></span>
+      ${icon('hard-drive', 13)}
+      <span class="mount-name" title="${escapeHtml(info.name)}">${escapeHtml(info.name)}</span>
+      <span class="mount-meta">${needs ? 'reconnect' : info.state === 'syncing' ? 'syncing…' : `${info.files} files`}</span>
+      <button class="icon-btn xs" data-mount-sync title="Pull changes from the folder" aria-label="Pull changes" ${needs ? 'disabled' : ''}>${icon('folder-sync', 13)}</button>
+      <button class="icon-btn xs" data-mount-menu title="Folder options" aria-label="Folder options">${icon('more', 13)}</button>
+    </div>`;
+  host.querySelector('[data-mount-sync]')?.addEventListener('click', () => syncMount('pull'));
+  host.querySelector('[data-mount-menu]')?.addEventListener('click', (event) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    openMountMenu(rect.left, rect.bottom + 4);
+  });
+}
+
+function openMountMenu(x, y) {
+  const mount = state.mount;
+  if (!mount) return;
+  document.querySelector('.ctx-menu')?.remove();
+  const menu = el('div', { class: 'ctx-menu' });
+  const action = (label, glyph, run, danger = false) => {
+    const item = el('button', { class: `ctx-item ${danger ? 'danger' : ''}` });
+    item.innerHTML = `${icon(glyph, 14)}<span>${label}</span>`;
+    item.onclick = () => {
+      menu.remove();
+      run();
+    };
+    menu.append(item);
+  };
+  action('Pull changes from folder', 'folder-sync', () => syncMount('pull'));
+  action('Write everything to folder', 'upload', () => syncMount('push'));
+  action('Open the folder’s files', 'folder-open', () => document.querySelector('#file-tree')?.scrollIntoView({ block: 'start' }));
+  action('Disconnect folder', 'unplug', () => unmountFolder(), true);
+  document.body.append(menu);
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = `${Math.min(x, window.innerWidth - rect.width - 8)}px`;
+  menu.style.top = `${Math.min(y, window.innerHeight - rect.height - 8)}px`;
+  const close = (event) => {
+    if (menu.contains(event.target)) return;
+    menu.remove();
+    document.removeEventListener('pointerdown', close);
+  };
+  setTimeout(() => document.addEventListener('pointerdown', close), 0);
+}
+
+/* ----------------------------------------------------------- dependencies -- */
+
+/**
+ * What `package.json` asks for, and whether it is actually on disk.
+ *
+ * This is the answer to "is my npm install real?" — visible without opening a
+ * terminal, and one click away from running it when something is missing.
+ */
+async function readManifest() {
+  const app = deps.getState();
+  if (!app?.project) return null;
+  try {
+    const text = await app.fs.readText(app.project.id, 'package.json');
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function installedVersions() {
+  const out = new Map();
+  for (const file of state.files) {
+    const match = /^node_modules\/((?:@[^/]+\/)?[^/]+)\/package\.json$/.exec(file.path);
+    if (!match) continue;
+    out.set(match[1], true);
+  }
+  return out;
+}
+
+async function renderDependencies() {
+  const host = $('#deps-card');
+  if (!host) return;
+  const manifest = await readManifest();
+  const deps = Object.entries({ ...(manifest?.dependencies || {}), ...(manifest?.devDependencies || {}) });
+  if (!deps.length) {
+    host.hidden = true;
+    host.innerHTML = '';
+    return;
+  }
+  const installed = installedVersions();
+  const missing = deps.filter(([name]) => !installed.has(name));
+  host.hidden = false;
+  host.innerHTML = `<button class="deps-head" aria-expanded="${state.depsOpen}">
+      ${icon(state.depsOpen ? 'chevron-down' : 'chevron-right', 12)}
+      ${icon('package', 13)}
+      <span>Packages</span>
+      <span class="deps-count ${missing.length ? 'warn' : ''}">${deps.length - missing.length}/${deps.length}</span>
+      ${missing.length ? `<span class="deps-action" data-deps-install title="npm install">${icon('download', 12)} install</span>` : ''}
+    </button>
+    <div class="deps-list" ${state.depsOpen ? '' : 'hidden'}>
+      ${deps
+        .map(
+          ([name, range]) => `<div class="deps-row ${installed.has(name) ? 'ok' : 'missing'}">
+            <span class="ft ft-modules">${icon(installed.has(name) ? 'box' : 'warn', 12)}</span>
+            <span class="deps-name">${escapeHtml(name)}</span>
+            <span class="deps-range">${escapeHtml(String(range))}</span>
+          </div>`,
+        )
+        .join('')}
+    </div>`;
+  host.querySelector('.deps-head').onclick = () => {
+    state.depsOpen = !state.depsOpen;
+    renderDependencies();
+  };
+  host.querySelector('[data-deps-install]')?.addEventListener('click', async (event) => {
+    event.stopPropagation();
+    deps.setView('terminal');
+    await deps.runCommand?.('npm install');
+  });
 }
 
 /* -------------------------------------------------------------- toolbar --- */
@@ -743,9 +1127,7 @@ function bindToolbar() {
     const node = $(selector);
     if (node) node.onclick = handler;
   };
-  on('#btn-new-file', () => newFile());
-  on('#btn-upload-files', () => pickFiles());
-  on('#btn-import-repo', () => importRepo());
+  on('#btn-add', () => toggleAddMenu());
   on('#btn-download-project', () => downloadProjectZip());
   on('#btn-collapse-tree', () => document.querySelector('#view-files')?.classList.toggle('tree-hidden'));
   const search = $('#file-search');
@@ -763,6 +1145,60 @@ function bindToolbar() {
       }
     };
   }
+}
+
+/** Everything that adds to the workspace lives behind one button. */
+function toggleAddMenu(force) {
+  const menu = $('#add-menu');
+  const button = $('#btn-add');
+  if (!menu || !button) return;
+  const open = force ?? menu.hidden;
+  menu.hidden = !open;
+  button.setAttribute('aria-expanded', String(open));
+  menu.innerHTML = '';
+  if (!open) return;
+
+  // Anchor under the button, but measure first: on a phone the toolbar is
+  // narrower than the menu, and `right: 0` alone pushed it off the left edge.
+  menu.style.position = 'fixed';
+  const anchor = button.getBoundingClientRect();
+  const width = Math.min(268, window.innerWidth - 24);
+  menu.style.width = `${width}px`;
+  const left = Math.min(Math.max(12, anchor.right - width), window.innerWidth - width - 12);
+  menu.style.left = `${left}px`;
+  menu.style.right = 'auto';
+  menu.style.top = `${Math.round(anchor.bottom + 6)}px`;
+
+  const item = (label, glyph, hint, run) => {
+    const node = el('button', { class: 'ctx-item', role: 'menuitem' });
+    node.innerHTML = `${icon(glyph, 14)}<span class="ctx-label">${label}${hint ? `<em>${hint}</em>` : ''}</span>`;
+    node.onclick = () => {
+      toggleAddMenu(false);
+      run();
+    };
+    menu.append(node);
+  };
+  item('New file', 'file', 'or a path like src/app.js', () => newFile());
+  item('Upload files', 'upload', '', () => pickFiles());
+  item('Mount a folder…', 'folder-plus', supportsFolderMount() ? 'connect a real folder' : 'needs Chrome or Edge', () => mountFolder());
+  item('Import a repository…', 'github', 'owner/repo', () => importRepo());
+
+  const close = (event) => {
+    if (menu.contains(event.target) || button.contains(event.target)) return;
+    toggleAddMenu(false);
+    document.removeEventListener('pointerdown', close);
+    document.removeEventListener('keydown', onKey, true);
+  };
+  const onKey = (event) => {
+    if (event.key === 'Escape') {
+      toggleAddMenu(false);
+      button.focus();
+    }
+  };
+  setTimeout(() => {
+    document.addEventListener('pointerdown', close);
+    document.addEventListener('keydown', onKey, true);
+  }, 0);
 }
 
 function bindShortcuts() {

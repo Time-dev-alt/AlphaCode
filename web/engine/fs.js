@@ -12,7 +12,12 @@
  */
 
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
-const IGNORE = new Set(['node_modules', '.git', '.cache', '.next', '__pycache__', '.venv']);
+// Directories with no project meaning. `node_modules` is deliberately *not*
+// here: an installed package has to be visible to the file tree, the editor and
+// the folder mount, or `npm install` looks like it did nothing. Consumers that
+// do not want it (the agent's snapshot, the preview bundle) filter it out.
+const IGNORE = new Set(['.git', '.cache', '.next', '__pycache__', '.venv']);
+const MAX_LISTED = 12000;
 
 export function normPath(input) {
   let p = String(input ?? '').replace(/\\/g, '/').trim();
@@ -217,7 +222,7 @@ export class OpfsFs {
           const file = await entry.getFile();
           out.push({ path, size: file.size, updatedAt: file.lastModified });
         }
-        if (out.length > 4000) return;
+        if (out.length > MAX_LISTED) return;
       }
     };
     try {
@@ -242,6 +247,44 @@ export class OpfsFs {
 export class FileSystem {
   constructor(backend) {
     this.backend = backend;
+    this.listeners = new Set();
+    this.suspended = 0;
+  }
+
+  /**
+   * Watch every write, delete and move.
+   *
+   * The folder mount, the preview reload and the file tree all want to know
+   * about the same event, and they all want it synchronously — so this is a
+   * plain listener list, not a pub/sub bus.
+   *
+   * @returns {() => void} unsubscribe
+   */
+  onChange(fn) {
+    this.listeners.add(fn);
+    return () => this.listeners.delete(fn);
+  }
+
+  /** Stop reporting changes (used while a mount writes its own files back). */
+  mute() {
+    this.suspended += 1;
+    let done = false;
+    return () => {
+      if (done) return;
+      done = true;
+      this.suspended = Math.max(0, this.suspended - 1);
+    };
+  }
+
+  emit(event) {
+    if (this.suspended) return;
+    for (const fn of this.listeners) {
+      try {
+        fn(event);
+      } catch {
+        /* a broken listener must not break a write */
+      }
+    }
   }
 
   /** 'opfs' | 'indexeddb' | 'memory' — where these files actually live. */
@@ -255,7 +298,9 @@ export class FileSystem {
     const text = typeof content === 'string' ? content : String(content ?? '');
     if (text.length > MAX_FILE_BYTES) throw new Error(`File too large (${text.length} bytes > ${MAX_FILE_BYTES})`);
     await this.backend.write(projectId, path, content);
-    return { path, bytes: typeof content === 'string' ? text.length : content.byteLength || 0 };
+    const size = typeof content === 'string' ? text.length : content.byteLength || 0;
+    this.emit({ type: 'write', projectId, path, size });
+    return { path, bytes: size };
   }
 
   async read(projectId, rawPath) {
@@ -345,16 +390,23 @@ export class FileSystem {
     }
   }
 
-  async list(projectId) {
-    return (await this.backend.list(projectId)).sort((a, b) => a.path.localeCompare(b.path));
+  async list(projectId, { includeModules = true } = {}) {
+    const files = await this.backend.list(projectId);
+    const filtered = includeModules ? files : files.filter((file) => !file.path.startsWith('node_modules/'));
+    return filtered.sort((a, b) => a.path.localeCompare(b.path));
   }
 
   async remove(projectId, rawPath) {
-    await this.backend.remove(projectId, normPath(rawPath));
+    const path = normPath(rawPath);
+    await this.backend.remove(projectId, path);
+    this.emit({ type: 'remove', projectId, path });
   }
 
   async move(projectId, from, to) {
-    await this.backend.move(projectId, normPath(from), normPath(to));
+    const a = normPath(from);
+    const b = normPath(to);
+    await this.backend.move(projectId, a, b);
+    this.emit({ type: 'move', projectId, from: a, to: b });
   }
 
   /** glob: **, *, ?, {a,b} — same semantics as the server-side tool. */

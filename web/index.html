@@ -170,9 +170,10 @@
             <input id="file-search" type="search" placeholder="Find a file…" aria-label="Find a file" autocomplete="off" spellcheck="false">
           </label>
           <div class="grow"></div>
-          <button class="btn sm" id="btn-new-file" data-icon="plus" data-icon-size="13">New</button>
-          <button class="btn sm" id="btn-upload-files" data-icon="upload" data-icon-size="13">Upload</button>
-          <button class="btn sm" id="btn-import-repo" title="Import a GitHub repository" data-icon="github" data-icon-size="13">Repo</button>
+          <div class="add-wrap">
+            <button class="btn sm primary" id="btn-add" aria-haspopup="menu" aria-expanded="false" data-icon="plus" data-icon-size="13">Add</button>
+            <div class="ctx-menu add-menu" id="add-menu" role="menu" hidden></div>
+          </div>
           <button class="btn sm" id="btn-download-project" title="Download the whole project as a .zip" data-icon="download" data-icon-size="13">Export</button>
           <button class="icon-btn sm" id="btn-refresh-files" title="Refresh" aria-label="Refresh files" data-icon="refresh" data-icon-size="14"></button>
         </div>
@@ -183,6 +184,8 @@
               <div class="grow"></div>
               <button class="icon-btn xs" id="btn-collapse-tree" title="Hide the file list" aria-label="Hide the file list" data-icon="panel-left" data-icon-size="13"></button>
             </div>
+            <div class="mount-bar" id="mount-bar" hidden></div>
+            <div class="deps-card" id="deps-card" hidden></div>
             <div class="tree" id="file-tree" role="listbox" aria-label="Project files"></div>
           </div>
           <div class="pane editor-pane">

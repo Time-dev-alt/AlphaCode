@@ -323,10 +323,11 @@ ${this.plan ? `\n## Plan (approved)\n${this.plan}\n` : ''}${subagentType ? `\nYo
       jobs: this.jobs || null,
       mcpTools: this.mcpTools || [],
       snapshot: async () => {
-        const files = await this.fs.list(this.projectId);
+        // Exclude node_modules at the listing stage: a big install would
+        // otherwise fill the 2000-file budget before any project file is read.
+        const files = await this.fs.list(this.projectId, { includeModules: false });
         const out = {};
         for (const file of files.slice(0, 2000)) {
-          if (file.path.startsWith('node_modules/')) continue;
           try {
             out[file.path] = await this.fs.readText(this.projectId, file.path);
           } catch {
@@ -457,7 +458,7 @@ ${this.plan ? `\n## Plan (approved)\n${this.plan}\n` : ''}${subagentType ? `\nYo
    */
   async send(userText) {
     this.tools = buildTools(this.toolContext());
-    this.fileIndex = (await this.fs.list(this.projectId)).map((f) => f.path);
+    this.fileIndex = (await this.fs.list(this.projectId, { includeModules: false })).map((f) => f.path);
     const text = String(userText || '').slice(0, 40_000);
     this.messages.push({ role: 'user', content: text });
     await this.store.addMessage(this.threadId, 'user', { text });
@@ -485,7 +486,7 @@ ${this.plan ? `\n## Plan (approved)\n${this.plan}\n` : ''}${subagentType ? `\nYo
         finishReason = result.finishReason || 'stop';
         break;
       }
-      this.fileIndex = (await this.fs.list(this.projectId)).map((f) => f.path);
+      this.fileIndex = (await this.fs.list(this.projectId, { includeModules: false })).map((f) => f.path);
       const toolResults = await this.executeToolCalls(result.toolCalls, tools);
       for (const tr of toolResults) {
         this.messages.push({ role: 'tool', tool_call_id: tr.id, name: tr.name, content: tr.content });

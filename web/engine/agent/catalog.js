@@ -278,3 +278,70 @@ export function attemptModels(provider, { live = [], preferred = '', limit = 3, 
   const capped = ordered.slice(0, Math.max(limit, starred.length));
   return capped.length ? capped : best;
 }
+
+/* ----------------------------------------------------------- router health -- */
+
+/**
+ * Is the free router actually answering *right now*?
+ *
+ * A dead router was only discoverable by typing a prompt and watching it fail —
+ * which is a bad first minute for someone who was told the app is free. This
+ * probe is deliberately cheap: one `GET /models` per keyless router, no chat
+ * request, no tokens. It answers three questions the status pill needs:
+ *
+ *   • does the router respond at all        → `blocked` when it does not;
+ *   • does it respond only through the relay → `relay` (still fine, just slower);
+ *   • how many models does it offer          → the "live" count.
+ *
+ * @param {Array<{id:string, baseUrl:string, key?:string, free?:boolean}>} providers
+ * @returns {Promise<{state:'live'|'relay'|'blocked'|'unknown', providers:Array, liveCount:number, checkedAt:number}>}
+ */
+export async function probeModels(providers = [], { fetchImpl, timeoutMs = 8_000 } = {}) {
+  const results = [];
+  for (const provider of providers) {
+    if (!provider?.id) continue;
+    const result = await fetchModels({
+      provider: provider.id,
+      baseUrl: provider.baseUrl || '',
+      key: provider.key || '',
+      fetchImpl,
+      timeoutMs,
+    });
+    results.push({
+      provider: provider.id,
+      ok: result.models.length > 0,
+      via: result.relayed ? 'relay' : result.models.length ? 'direct' : '',
+      count: result.models.length,
+      error: result.error || '',
+    });
+  }
+
+  const responding = results.filter((row) => row.ok);
+  const state = !results.length ? 'unknown' : responding.length ? (responding.every((row) => row.via === 'relay') ? 'relay' : 'live') : 'blocked';
+  return {
+    state,
+    providers: results,
+    liveCount: responding.reduce((sum, row) => sum + row.count, 0),
+    checkedAt: Date.now(),
+  };
+}
+
+/** How the status pill should describe a probe result. Never throws. */
+export function describeProbe(probe) {
+  const rows = probe?.providers || [];
+  const failed = rows.filter((row) => !row.ok);
+  if (!probe || probe.state === 'unknown') return { tone: 'warn', label: 'router unknown', detail: 'No free router has been checked yet.' };
+  if (probe.state === 'blocked') {
+    return {
+      tone: 'err',
+      label: 'free router offline',
+      detail: `${rows.map((row) => row.provider).join(', ')} did not answer${failed.length ? ` (${failed[0].error})` : ''}. The offline demo model will answer until it comes back.`,
+    };
+  }
+  const via = probe.state === 'relay' ? ' via relay' : '';
+  return {
+    tone: probe.state === 'relay' ? 'warn' : 'ok',
+    label: `${rows.filter((r) => r.ok).map((r) => r.provider).join(' + ')}${via}`,
+    detail: rows.map((row) => `${row.provider}: ${row.ok ? `${row.count} models (${row.via})` : row.error}`).join('\n'),
+  };
+}

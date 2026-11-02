@@ -3,7 +3,7 @@
   "version": "10.0.0",
   "private": true,
   "type": "module",
-  "description": "AlphaCode — an AI app builder and coding agent that runs entirely in your browser: real Node + npm, CPython, a shell, SQLite, MCP and deploys, all in the tab.",
+  "description": "AlphaCode \u2014 an AI app builder and coding agent that runs entirely in your browser: real Node + npm, CPython, a shell, SQLite, MCP and deploys, all in the tab.",
   "license": "MIT",
   "engines": {
     "node": ">=22.5.0"
@@ -20,7 +20,9 @@
     "deploy:cloudflare": "node scripts/deploy-cloudflare.mjs",
     "edge:config": "node scripts/render-edge-config.mjs",
     "start:server": "node --disable-warning=ExperimentalWarning src/server.mjs",
-    "vendor:nodepod": "node scripts/vendor-nodepod.mjs"
+    "vendor:nodepod": "node scripts/vendor-nodepod.mjs",
+    "deploy:worker": "npm run build && wrangler deploy",
+    "check:worker": "wrangler deploy --dry-run --outdir .wrangler-dry"
   },
   "keywords": [
     "coding-agent",

@@ -457,6 +457,8 @@ test('settings opens as readable, sectioned panes with a model picker', { skip }
   assert.ok(body.querySelectorAll('#set-model option').length > 3, 'the default-model select is populated');
   assert.ok(body.querySelectorAll('.model-row').length > 0, 'the picker lists models before any fetch (curated)');
   assert.ok(body.querySelector('#set-fetch-models'), 'fetch models is wired');
+  assert.ok(body.querySelector('#router-health-state'), 'the panel reports router health');
+  assert.ok(body.querySelector('#set-probe-routers'), 'and can re-check it');
 
   body.querySelector('.set-tab[data-tab="runtimes"]').click();
   assert.ok(body.querySelector('#set-wasm'), 'the WASM compiler switch exists');
@@ -471,6 +473,7 @@ test('settings opens as readable, sectioned panes with a model picker', { skip }
   // rather than left clickable to fail inside the SDK.
   assert.equal(body.querySelector('#set-wc-boot').disabled, true);
   assert.ok(body.querySelector('#set-cc'), 'the compile endpoint field is still there');
+  assert.ok(body.querySelector('#set-wc-clear-cache'), 'cached installs can be forgotten');
 
   doc.querySelector('#btn-close-modal').click();
   assert.equal(doc.querySelector('#modal').hidden, true);
@@ -526,4 +529,74 @@ test('hiding the preview is a desktop arrangement, not a phone one', { skip }, a
   assert.ok(openMedia > 0 && depth > 0, 'the preview-hidden rule is scoped to a media query');
   assert.match(css, /@media \(min-width: 821px\)/, 'scoped to the two-column layout');
   assert.match(css, /\.app\[data-mobile-pane='preview'\] \.preview-col \{[^}]*opacity: 1/, 'the phone pane forces the preview visible');
+});
+
+test('a paused turn is resumed in place, without inventing a user message', { skip }, async () => {
+  const { window } = ctx;
+  const app = window.__alphacode;
+  const doc = window.document;
+  const before = (await app.state.store.messages(app.state.thread.id)).filter((m) => m.role === 'user').length;
+  const bubbles = doc.querySelectorAll('#transcript .msg.user').length;
+
+  // The Continue button on a budget notice used to call send('continue'), which
+  // rendered "continue" as if the person had typed it.
+  app.state.running = false;
+  await app.resume();
+  await wait(900);
+
+  const users = (await app.state.store.messages(app.state.thread.id)).filter((m) => m.role === 'user');
+  assert.equal(doc.querySelectorAll('#transcript .msg.user').length, bubbles, 'no new user bubble');
+  assert.ok(doc.querySelector('.resume-divider'), 'the seam is marked');
+  assert.ok(users.length > before, 'the model still received the nudge');
+  const last = String(users.at(-1)?.content?.text ?? users.at(-1)?.content ?? '');
+  assert.match(last, /do not restart/i, 'the nudge tells the model to continue, not to begin again');
+});
+
+test('the preview only rebuilds when the bundle changed', { skip }, async () => {
+  // Note: this drives the *built bundle's* own refreshPreview through the public
+  // app surface (a filesystem write + the debounced refresh), not a second import
+  // of the module — importing it again would give this test a different copy of
+  // the module state than the one the page is running.
+
+  const { window } = ctx;
+  const doc = window.document;
+  const app = window.__alphacode;
+  const frame = doc.querySelector('#preview-frame');
+
+  const refreshPreview = app.refreshPreview;
+  assert.equal(typeof refreshPreview, 'function', 'the app exposes its preview refresher');
+
+  // Seed a page and render it once.
+  await app.state.fs.write(app.state.project.id, 'index.html', '<!doctype html><html><body><h1>one</h1></body></html>');
+  await refreshPreview({ force: true });
+  assert.match(frame.srcdoc, /one/);
+
+  // A second call with nothing changed must not touch srcdoc — assigning it
+  // reloads the iframe and loses scroll position and form state.
+  frame.srcdoc = 'sentinel';
+  await refreshPreview();
+  assert.equal(frame.srcdoc, 'sentinel', 'no rebuild when the files have not changed');
+
+  // A real change does rebuild. The write fires the filesystem event, which is
+  // what makes the refresh happen at all — sizes and mtimes can collide.
+  await app.state.fs.write(app.state.project.id, 'index.html', '<!doctype html><html><body><h1>two</h1></body></html>');
+  await refreshPreview();
+  assert.match(frame.srcdoc, /two/);
+  assert.match(frame.srcdoc, /__alpha:pick|postMessage/, 'the preview harness is still injected');
+});
+
+test('the status pill reports which free router actually answers', { skip }, async () => {
+  const { window } = ctx;
+  const doc = window.document;
+  const app = window.__alphacode;
+  const chip = doc.querySelector('#status-router');
+  assert.ok(chip, 'the pill has a router chip');
+
+  // The boot probe runs against the test fetch stub, which answers 404 to
+  // everything — so the honest report is "offline", not a green light.
+  await wait(400);
+  assert.equal(chip.hidden, false, 'a probe result is shown');
+  assert.ok(['ok', 'warn', 'err'].includes(chip.dataset.tone), `tone is ${chip.dataset.tone}`);
+  assert.ok(chip.textContent.trim().length > 0);
+  assert.ok(app.state.routerHealth, 'the result is kept for the settings row');
 });

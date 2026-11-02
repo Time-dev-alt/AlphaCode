@@ -83,10 +83,24 @@ automatically. Nothing else to configure.
 If the dashboard sends you to **Workers** instead of **Pages**, the same repo
 works there:
 
-- Build command: `npm run build`
-- Deploy command: `npx wrangler deploy`
+- **Build command: leave it empty.** `wrangler.jsonc` declares
+  `build.command = "npm run build"`, so Wrangler builds `dist/` itself. A clean
+  checkout has no `dist/` (it is git-ignored) and that, not the code, is what
+  used to fail the build with *"the directory specified by assets.directory does
+  not exist"*.
+- **Deploy command: `npx wrangler deploy`.**
+- ❌ **Not `npx wrangler preview`.** That command is open beta — Wrangler says so
+  in its own help text — and it creates a *preview* deployment that expires; a
+  build wired to it succeeds at nothing and the Worker never gets a live
+  version. If your project shows that command, change it in **Settings → Build →
+  Deploy command**.
 - `wrangler.jsonc` (committed) sets `assets.directory = "dist"` and SPA
   fallback. No `main` entry — this is an assets-only Worker.
+- Verify locally without touching your account:
+
+  ```bash
+  npm run deploy:worker -- --dry-run     # builds, packages, uploads nothing
+  ```
 - Add `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` as Worker variables; the
   OAuth routes then need to be served by a Pages project or a small Worker
   route, because `functions/` is a Pages-only convention. Without them the app

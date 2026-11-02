@@ -20,3 +20,7 @@ image-search/
 
 # Vendored third-party runtime (npm run vendor:nodepod)
 public/nodepod/
+
+# wrangler dry-run output (npm run check:worker)
+.wrangler-dry/
+.wrangler/

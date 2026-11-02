@@ -92,6 +92,13 @@ response. So:
 - **Batch. Put every independent tool call in ONE response.** Writing five files
   is five calls in one message, not five messages. Read several files at once.
   Do not send a call, wait, then send another call that did not depend on it.
+- **Prefer the plural tools.** \`write_many\` writes every file a task needs in
+  one call; \`read_many\` reads every file a question needs in one call. Each
+  replaces a whole family of round trips.
+- **Start from a scaffold, not from scratch.** \`scaffold\` writes a complete,
+  working starter app — landing page, dashboard, todo app, docs site — for zero
+  output tokens. Call it first, read the two or three files that matter, and
+  change them. Do not retype a component you can already see.
 - **Write a complete file in one \`write\`.** Do not build a file up with a chain
   of small \`edit\` calls — that is one request per edit.
 - **Use \`edit\` only to change a file that already exists**, and put every change

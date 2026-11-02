@@ -15,6 +15,7 @@ import { Harness, Run } from '../engine/harness.js';
 import { canVerify, verifyDecision, verificationPrompt, keyOf, verifySummary } from '../engine/agent/verify.js';
 import { getGovernor } from '../engine/agent/governor.js';
 import { toModelMessages } from '../engine/agent/history.js';
+import { renderScaffold } from '../engine/agent/scaffolds.js';
 import { FREE_MODELS, PROVIDERS, GUEST_MODEL } from '../engine/providers.js';
 import { runPython, pipInstall, loadPython, pythonReady } from '../engine/python.js';
 import { createNodeSession } from '../engine/node/session.js';
@@ -23,7 +24,7 @@ import { JobManager } from '../engine/jobs.js';
 import { loadHooks } from '../engine/hooks.js';
 import { runWasi, compileC, canCompileC, RUNTIME_MATRIX } from '../engine/native.js';
 import { connectAll, contentToText } from '../engine/mcp.js';
-import { mountWorkspace, refreshPreview, renderJobs, renderHistory, setLayout, setMobilePane, pickAttachment, setPromptValue, previewErrors, clearPreviewErrors, waitForPreviewReport, clearVisualEdit } from './workspace.js';
+import { mountWorkspace, refreshPreview, renderJobs, renderHistory, setLayout, setMobilePane, pickAttachment, setPromptValue, previewErrors, clearPreviewErrors, waitForPreviewReport, clearVisualEdit, syncPaneToView } from './workspace.js';
 import { zipSync, download } from '../engine/zip.js';
 import { TerminalView } from '../../public/assets/term.js';
 import {
@@ -137,6 +138,20 @@ async function startFromTemplate(template) {
     await refreshProjects();
   }
   for (const [path, content] of Object.entries(template.files || {})) await state.fs.write(project.id, path, content);
+
+  // A scaffolded template is a finished app, not a prompt: write it here, for
+  // free, and let the user look at it before deciding whether the model is
+  // needed at all. This is the cheapest possible first turn — zero requests.
+  if (template.scaffold) {
+    const rendered = renderScaffold(template.scaffold, { brand: template.brand || project.name });
+    for (const [path, content] of Object.entries(rendered.files)) await state.fs.write(project.id, path, content);
+    await refreshFiles();
+    refreshPreview({ force: true });
+    toast(`“${template.name}” is ready — describe any change to iterate`, 'ok', 3400);
+    $('#prompt')?.focus();
+    return;
+  }
+
   await refreshFiles();
   refreshPreview({ force: true });
   toast(`Started “${template.name}”`, 'ok');
@@ -841,6 +856,14 @@ function summaryForStored(content) {
     const removed = lines.filter((l) => l.startsWith('-')).length;
     return `+${added} −${removed} · ${display.path || ''}`;
   }
+  if (display?.kind === 'diff-many') {
+    const files = display.files || [];
+    const added = files.reduce((n, f) => n + String(f.diff || '').split('\n').filter((l) => l.startsWith('+')).length, 0);
+    const removed = files.reduce((n, f) => n + String(f.diff || '').split('\n').filter((l) => l.startsWith('-')).length, 0);
+    return `${files.length} files · +${added} −${removed}`;
+  }
+  if (display?.kind === 'scaffold') return `${display.label} · ${display.files?.length || 0} files`;
+  if (display?.kind === 'read-many') return `${display.count || 0} files read`;
   if (display?.kind === 'bash') return `exit ${display.exitCode}`;
   if (display?.kind === 'files') return `${display.files?.length || 0} files`;
   if (display?.kind === 'search') return `${display.hits?.length || 0} matches`;
@@ -1051,6 +1074,15 @@ function finishTool(card, { ok, summary, display, output }) {
   if (!body) return;
   if (display?.kind === 'diff' && display.diff) {
     body.innerHTML = renderDiff(display.diff);
+  } else if (display?.kind === 'diff-many' && display.files?.length) {
+    // One card, several files: label each diff so a multi-file write reads like
+    // a changeset instead of an undifferentiated wall of +/- lines.
+    body.innerHTML = display.files
+      .map((file) => `<div class="diff-file"><span class="diff-path">${escapeHtml(file.path)}</span>${file.diff ? renderDiff(file.diff) : '<span class="tiny">(new file)</span>'}</div>`)
+      .join('');
+  } else if (display?.kind === 'scaffold' && display.files?.length) {
+    body.innerHTML = `<div class="scaffold-note">Wrote a complete, working ${escapeHtml(display.label || 'app')}:</div>` +
+      display.files.map((path) => `<div class="scaffold-file">${escapeHtml(path)}</div>`).join('');
   } else if (output && !card._out) {
     body.textContent = String(output).slice(0, 4000);
   }
@@ -1323,6 +1355,14 @@ function handleEvent(ev) {
     case 'rate_wait': {
       setStatus(`rate limit — waiting ${Math.ceil(ev.ms / 1000)}s before the next request`);
       pushActivity({ kind: 'think', title: `Waiting out a rate limit (${Math.ceil(ev.ms / 1000)}s)`, state: 'run' });
+      break;
+    }
+    case 'budget_extended': {
+      // Autonomy, made visible: the turn did not stop at its first checkpoint.
+      setStatus(`continuing — ${ev.budget} requests available this turn`);
+      pushActivity({ kind: 'think', title: ev.message || 'Continuing the build', state: 'run' });
+      state.requestBudget = ev.budget;
+      renderRequestMeter();
       break;
     }
     case 'provider_skip': {
@@ -2007,6 +2047,7 @@ function openSettings() {
         <div class="hint">How many times the agent may call the model before it pauses. Fewer requests is the single best way to stay inside a free tier — 8 finishes most tasks, and a paused turn continues with one click.</div>
       </div>
       <label class="check"><input type="checkbox" id="set-autoverify" ${state.settings.autoVerify !== false ? 'checked' : ''}> fix preview errors automatically after a change</label>
+      <label class="check"><input type="checkbox" id="set-autocontinue" ${state.settings.autoContinue !== false ? 'checked' : ''}> keep working past the request budget while it is making progress</label>
       <div class="fields">${rows}</div>
     </section>
     <section>
@@ -2241,6 +2282,13 @@ function openSettings() {
       state.settings = await state.store.saveSettings({ autoVerify: verifyToggle.checked });
     };
   }
+  const continueToggle = $('#set-autocontinue');
+  if (continueToggle) {
+    continueToggle.onchange = async () => {
+      state.settings = await state.store.saveSettings({ autoContinue: continueToggle.checked });
+      toast(continueToggle.checked ? 'Long tasks will keep going' : 'A turn will stop at its first budget', 'info', 2600);
+    };
+  }
   let saveTimer;
   body.querySelectorAll('[data-key],[data-model]').forEach((input) => {
     input.oninput = () => {
@@ -2287,7 +2335,6 @@ async function ensurePython() {
 
 /* ----------------------------------------------------------------- views --- */
 
-let paneSync = false;
 
 function setView(view) {
   state.view = view;
@@ -2298,17 +2345,10 @@ function setView(view) {
   if (view === 'db') renderDbs();
   if (view === 'deploy') renderDeployments();
   closeDrawer();
-  // On a phone the view and the bottom bar are the same idea; never let them
-  // disagree. `chat` maps to whichever of chat/preview the person is watching,
-  // so it is not forced back — that would undo a tap on Preview.
-  if (!paneSync) {
-    const pane = view === 'files' ? 'files' : view === 'terminal' ? 'terminal' : null;
-    if (pane && pane !== $('#app')?.dataset.mobilePane) {
-      paneSync = true;
-      setMobilePane(pane);
-      paneSync = false;
-    }
-  }
+  // On a phone the bottom bar must never point at a pane that cannot show the
+  // view that was just selected — that is a blank screen. This only moves the
+  // pane; the view is already what the caller asked for.
+  syncPaneToView(view);
 }
 
 const MODE_INFO = {

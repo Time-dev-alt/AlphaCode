@@ -4286,9 +4286,16 @@ select {
     grid-template-columns: minmax(0, 1fr);
     padding-bottom: 58px;
   }
+  /* Both panes occupy the *single* row the workspace has on a phone. Without an
+     explicit row the grid sized itself to content, so the preview pane collapsed
+     to the iframe's intrinsic ~150 px and the rest of the screen was blank. */
+  .workspace {
+    grid-template-rows: minmax(0, 1fr);
+  }
   .work-col {
     border-right: 0;
     grid-column: 1;
+    grid-row: 1;
     min-height: 0;
   }
   .preview-col {
@@ -4296,12 +4303,44 @@ select {
     grid-row: 1;
     display: none;
     min-height: 0;
+    min-width: 0;
   }
   .app[data-mobile-pane='preview'] .preview-col {
     display: flex;
   }
   .app[data-mobile-pane='preview'] .work-col {
     display: none;
+  }
+  /* The preview owns the whole pane on a phone: no stage padding, no fake
+     device chrome — you are already on the device. */
+  .app[data-mobile-pane='preview'] .preview-stage {
+    padding: 0;
+    background-image: none;
+  }
+  .app[data-mobile-pane='preview'] .device-frame {
+    max-width: 100%;
+    border-radius: 0;
+    border: 0;
+    box-shadow: none;
+    background: var(--bg);
+  }
+  .app[data-mobile-pane='preview'] .frame-chrome {
+    display: none;
+  }
+  .preview-bar {
+    gap: 2px;
+    padding: 6px 8px;
+    min-height: 40px;
+    flex-wrap: nowrap;
+    overflow: hidden;
+  }
+  /* The address is decoration; the device switch and the actions are not. */
+  .preview-bar .address {
+    display: none;
+  }
+  /* A console drawer that covers half the screen is worse than useless. */
+  .console-drawer {
+    max-height: 42vh;
   }
   /* the tab strip is redundant when the bottom bar is right there */
   .tabs {

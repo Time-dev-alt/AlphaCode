@@ -23,14 +23,19 @@ import { buildSystemPrompt, budgetNote, rankFiles } from './agent/prompt.js';
  */
 const MAX_REQUESTS = 8;
 const MAX_SUBAGENT_REQUESTS = 4;
+/** How many times a productive turn may borrow another segment of requests. */
+const MAX_SEGMENTS = 3;
 /** Kept as an alias because other modules and tests import it. */
 const MAX_ITERATIONS = MAX_REQUESTS;
 const CONTEXT_WINDOW = 200_000;
 const COMPACT_AT = 0.86;
 
+/** Path normalisation for the bookkeeping above (the fs does the real one). */
+const normPathLite = (path) => String(path || '').replace(/^\/+/, '').replace(/\/{2,}/g, '/');
+
 /** Tools that never touch shared state, so a batch of them can run at once. */
 const PARALLEL_SAFE = new Set([
-  'read', 'ls', 'glob', 'grep', 'web_fetch', 'runtime_info', 'db_list', 'db_query', 'db_schema', 'db_rows',
+  'read', 'read_many', 'ls', 'glob', 'grep', 'web_fetch', 'runtime_info', 'db_list', 'db_query', 'db_schema', 'db_rows',
 ]);
 
 class Emitter {
@@ -252,11 +257,16 @@ export class Harness {
           .map((a) => ({ a, wait: governor.cooldownFor(a.provider) }))
           .sort((x, y) => x.wait - y.wait)[0];
         if (lastError) break;
-        throw new Error(
-          soonest
-            ? `Every provider is cooling down — ${PROVIDERS[soonest.a.provider]?.label || soonest.a.provider} is back in ${Math.ceil(soonest.wait / 1000)}s. Try again then.`
-            : 'No model providers are available. Add a key in Settings → Providers.',
-        );
+        if (soonest) {
+          // This is a pause, not a crash: the UI offers a Continue button.
+          const paused = new Error(
+            `Every provider is cooling down — ${PROVIDERS[soonest.a.provider]?.label || soonest.a.provider} is back in ${Math.ceil(soonest.wait / 1000)}s.`,
+          );
+          paused.paused = true;
+          paused.retryInMs = soonest.wait;
+          throw paused;
+        }
+        throw new Error('No model providers are available. Add a key in Settings → Providers.');
       }
 
       let retryableSeen = null;
@@ -373,6 +383,11 @@ export class Harness {
       }
     }
 
+    if (!lastError && governor.remaining <= 0) {
+      const paused = new Error(`Paused after ${governor.used} model requests to stay inside the rate limit.`);
+      paused.paused = true;
+      throw paused;
+    }
     throw lastError || new Error('No model providers are available. Add a key in Settings → Providers.');
   }
 
@@ -661,6 +676,12 @@ export class Harness {
         if (tool.name === 'write' || tool.name === 'edit' || tool.name === 'multiedit') {
           this.filesChanged.add(args.file_path || args.path);
           this.fileIndexDirty = true;
+        } else if (tool.name === 'write_many') {
+          for (const entry of args.files || []) if (entry?.file_path) this.filesChanged.add(normPathLite(entry.file_path));
+          this.fileIndexDirty = true;
+        } else if (tool.name === 'scaffold') {
+          for (const path of out.display?.files || []) this.filesChanged.add(path);
+          this.fileIndexDirty = true;
         }
         if (this.hooks?.post_tool) {
           const post = await runHooks(this.hooks, 'post_tool', { tool: tool.name, args, result: out.text?.slice(0, 2000), isError: Boolean(out.isError) }, { onLog: (line) => this.emit({ type: 'hook', event: 'post_tool', message: line }) });
@@ -699,7 +720,12 @@ export class Harness {
     const governor = this.governor || (this.governor = getGovernor());
     const settings = this.settings() || {};
     // One turn, one budget. Cooldowns survive it; the counter does not.
-    governor.budget = Number(settings.requestBudget) > 0 ? Number(settings.requestBudget) : MAX_REQUESTS;
+    const segment = Number(settings.requestBudget) > 0 ? Number(settings.requestBudget) : MAX_REQUESTS;
+    governor.budget = segment;
+    // The hard cap is what a single turn may ever spend, however many segments
+    // it borrows. Three segments is a big, autonomous build; past that the turn
+    // is going in circles.
+    governor.hardCap = Math.max(segment, Number(settings.requestCap) || segment * MAX_SEGMENTS);
     governor.used = 0;
     this.emit({ type: 'budget', budget: governor.budget, remaining: governor.budget });
 
@@ -712,7 +738,7 @@ export class Harness {
     // Unmetered providers (the offline demo) do not consume budget, so the
     // loop needs its own hard stop as well.
     let iterations = 0;
-    while (governor.remaining > 0 && iterations < governor.budget + 2) {
+    while (iterations < governor.hardCap + 2) {
       iterations += 1;
       if (this.signal?.aborted) {
         finishReason = 'stopped';
@@ -727,6 +753,29 @@ export class Harness {
       } catch (err) {
         if (err?.name === 'AbortError') {
           finishReason = 'stopped';
+          break;
+        }
+        if (err?.paused) {
+          // Out of this segment's requests. If the turn is still making progress
+          // and the hard cap allows it, borrow another segment and keep going:
+          // that is autonomy. The rate window still gates every request.
+          // A cooldown pause (`retryInMs`) cannot be fixed by more budget — the
+          // providers are simply resting — so only extend when it was the count.
+          const granted = err.retryInMs || settings.autoContinue === false ? 0 : governor.extend(MAX_REQUESTS);
+          if (granted > 0) {
+            this.emit({
+              type: 'budget_extended',
+              granted,
+              budget: governor.budget,
+              used: governor.used,
+              message: `Continuing — ${granted} more requests, still inside the rate limit.`,
+            });
+            continue;
+          }
+          finishReason = 'budget';
+          this.lastPause = err.retryInMs
+            ? { reason: 'rate', retryInMs: err.retryInMs, budget: governor.budget }
+            : { reason: 'budget', retryInMs: 0, budget: governor.budget };
           break;
         }
         // A context overflow is recoverable without spending the rest of the
@@ -780,12 +829,14 @@ export class Harness {
         });
       }
     }
-    if (governor.remaining <= 0 && finishReason === 'stop') finishReason = 'budget';
     if (finishReason === 'budget') {
       this.emit({
         type: 'budget_exhausted',
         budget: governor.budget,
-        message: `Stopped after ${governor.budget} model requests this turn to stay inside the rate limit. Say "continue" and I will pick up where I left off.`,
+        used: governor.used,
+        message: this.lastPause?.reason === 'rate'
+          ? `Paused after ${governor.used} requests — every provider is cooling down. Continue when you are ready.`
+          : `Paused after ${governor.used} requests this turn. Continue and I will pick up exactly where I left off.`,
       });
     }
     return { finishReason, text: finalText };

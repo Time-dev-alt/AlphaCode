@@ -512,7 +512,7 @@ export class TerminalView {
       const isCursorRow = r === this.cursor.row && this.cursorVisible && !this.altScreenHidden;
       parts.push(`<div class="row">${this.renderRow(this.screen[r], isCursorRow ? this.cursor.col : -1, r)}</div>`);
     }
-    this.node.innerHTML = parts.join('');
+    (this.canvas || this.node).innerHTML = parts.join('');
     if (nearBottom || this.stickToBottom) this.node.scrollTop = this.node.scrollHeight;
   }
 
@@ -549,13 +549,93 @@ export class TerminalView {
   }
 
   /* --------------------------------------------------------------- input -- */
+  /*
+   * Input goes through a pinned 1px textarea, not the keydown of the host div.
+   *
+   * Why: a div cannot take focus (no tabindex, and `.focus()` on it is a no-op),
+   * and on phones the `keydown` event often reports keyCode 229 for real
+   * characters — so keyboard input silently vanished. A textarea that never moves
+   * fixes both: it can be focused, it fires `input` for every character an IME or
+   * a predictive keyboard produces, and because it sits at the top-left corner it
+   * never gets scrolled out of view when the on-screen keyboard opens.
+   *
+   * A single space is kept in the box as a sentinel so Backspace always has
+   * something to delete; every input event is diffed against it and the box is
+   * reset immediately.
+   */
   bindInput() {
-    this.node.addEventListener('keydown', (e) => {
-      if (e.metaKey || (e.ctrlKey && e.key === 'v')) return; // let browser handle copy/paste
+    const doc = this.node.ownerDocument || globalThis.document;
+    // The screen model works without a DOM (tests, offscreen use). Only the
+    // caret box needs one, so skip it rather than crash.
+    if (!doc?.createElement) {
+      this.resetInput = () => {};
+      return;
+    }
+    if (this.input) this.input.remove();
+    const ta = doc.createElement('textarea');
+    ta.className = 'term-input';
+    ta.setAttribute('autocapitalize', 'off');
+    ta.setAttribute('autocorrect', 'off');
+    ta.setAttribute('autocomplete', 'off');
+    ta.setAttribute('spellcheck', 'false');
+    ta.setAttribute('aria-label', 'Terminal input');
+    ta.setAttribute('rows', '1');
+    ta.style.cssText =
+      'position:absolute;top:0;left:0;width:1px;height:1px;padding:0;margin:0;border:0;opacity:0;' +
+      'resize:none;overflow:hidden;background:transparent;color:transparent;caret-color:transparent;' +
+      'font-size:16px;z-index:2;';
+    if (typeof getComputedStyle === 'function' && getComputedStyle(this.node).position === 'static') {
+      this.node.style.position = 'relative';
+    }
+    this.input = ta;
+    // Repaints own the canvas, not the host: `innerHTML` on the host would wipe
+    // the caret box and blur it, dropping every keystroke after the first.
+    const canvas = doc.createElement('div');
+    canvas.className = 'term-canvas';
+    this.canvas = canvas;
+    this.node.append(canvas, ta);
+    this.sentinel = ' ';
+
+    const reset = () => {
+      ta.value = this.sentinel;
+      try {
+        ta.setSelectionRange(1, 1);
+      } catch {
+        /* older engines */
+      }
+    };
+    this.resetInput = reset;
+    reset();
+
+    // Every character, including IME composition and predictive keyboards.
+    ta.addEventListener('input', () => {
+      if (this.composing) return;
+      const value = ta.value;
+      if (value === this.sentinel) return;
+      const typed = value.replace(this.sentinel, '').replace(/\n/g, '\r');
+      reset();
+      if (typed) this.onInput(typed);
+      else this.onInput('\x7f');
+    });
+    ta.addEventListener('compositionstart', () => {
+      this.composing = true;
+    });
+    ta.addEventListener('compositionend', (event) => {
+      this.composing = false;
+      const typed = String(event.data || '').replace(/\n/g, '\r');
+      reset();
+      if (typed) this.onInput(typed);
+    });
+
+    ta.addEventListener('keydown', (e) => {
+      // Copy keeps the browser behaviour when there is a selection to copy.
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'c' && String(doc.getSelection() || '')) return;
+      // Paste, cut and select-all are handled by their own events.
+      if ((e.metaKey || e.ctrlKey) && ['v', 'x', 'a'].includes(e.key.toLowerCase())) return;
+
       let seq = '';
       const k = e.key;
-      if (e.ctrlKey) {
-        if (k === 'c' && this.node.ownerDocument.getSelection()?.toString()) return;
+      if (e.ctrlKey && !e.metaKey) {
         if (k.length === 1) {
           const code = k.toUpperCase().charCodeAt(0);
           if (code >= 64 && code <= 95) seq = String.fromCharCode(code - 64);
@@ -603,74 +683,70 @@ export class TerminalView {
           case 'PageDown':
             seq = '\x1b[6~';
             break;
-          case 'Insert':
-            seq = '\x1b[2~';
-            break;
           case 'Delete':
             seq = '\x1b[3~';
             break;
-          case 'F1':
-            seq = '\x1bOP';
-            break;
-          case 'F2':
-            seq = '\x1bOQ';
-            break;
-          case 'F3':
-            seq = '\x1bOR';
-            break;
-          case 'F4':
-            seq = '\x1bOS';
-            break;
-          case 'F5':
-            seq = '\x1b[15~';
-            break;
-          case 'F6':
-            seq = '\x1b[17~';
-            break;
-          case 'F7':
-            seq = '\x1b[18~';
-            break;
-          case 'F8':
-            seq = '\x1b[19~';
-            break;
-          case 'F9':
-            seq = '\x1b[20~';
-            break;
-          case 'F10':
-            seq = '\x1b[21~';
-            break;
-          case 'F11':
-            seq = '\x1b[23~';
-            break;
-          case 'F12':
-            seq = '\x1b[24~';
-            break;
           default:
-            if (k.length === 1 && !e.ctrlKey && !e.metaKey) seq = k;
+            // Printable keys arrive through the `input` event instead, so they are
+            // never sent twice and IME input works.
+            if (/^F\d{1,2}$/.test(k)) {
+              const n = Number(k.slice(1));
+              const fkeys = { 1: '\x1bOP', 2: '\x1bOQ', 3: '\x1bOR', 4: '\x1bOS', 5: '\x1b[15~', 6: '\x1b[17~', 7: '\x1b[18~', 8: '\x1b[19~', 9: '\x1b[20~', 10: '\x1b[21~', 11: '\x1b[23~', 12: '\x1b[24~' };
+              seq = fkeys[n] || '';
+            }
         }
       }
+
       if (seq) {
         e.preventDefault();
+        reset();
         this.onInput(seq);
       }
+      // Keep the caret box alive even if something stole focus.
+      if (doc.activeElement !== ta && seq) ta.focus({ preventScroll: true });
     });
-    this.node.addEventListener('paste', (e) => {
+
+    ta.addEventListener('paste', (e) => {
       const text = e.clipboardData?.getData('text');
-      if (text) {
-        e.preventDefault();
-        this.onInput(text.replace(/\r?\n/g, '\r'));
-      }
+      if (!text) return;
+      e.preventDefault();
+      reset();
+      this.onInput(text.replace(/\r?\n/g, '\r'));
     });
-    this.node.addEventListener('mousedown', () => {
-      this.node.focus();
+
+    this.node.addEventListener('mousedown', (e) => {
+      if (e.target === ta) return;
+      const selection = String(doc.getSelection() || '');
+      if (selection) return; // let the user select text to copy
+      e.preventDefault();
+      this.focus();
     });
     this.node.addEventListener('scroll', () => {
       this.stickToBottom = this.node.scrollHeight - this.node.scrollTop - this.node.clientHeight < 40;
     });
   }
 
+  /** Send a string as if it had been typed (used by the on-screen key bar). */
+  send(text) {
+    this.resetInput?.();
+    this.onInput(text);
+  }
+
   focus() {
-    this.node.focus();
+    try {
+      this.input?.focus({ preventScroll: true });
+    } catch {
+      this.node.focus?.();
+    }
+  }
+
+  blur() {
+    this.input?.blur();
+  }
+
+  scrollToBottom() {
+    this.stickToBottom = true;
+    this.node.scrollTop = this.node.scrollHeight;
   }
 
   measure() {

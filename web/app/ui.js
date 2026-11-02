@@ -209,3 +209,99 @@ export function debounce(fn, ms = 220) {
     t = setTimeout(() => fn(...args), ms);
   };
 }
+
+/* ------------------------------------------------------------- dialogs ---- */
+
+/**
+ * An in-app replacement for `window.prompt` / `window.confirm`, which are
+ * blocked inside sandboxed frames and look nothing like the rest of the app.
+ *
+ * Resolves to the trimmed string, or null when dismissed.
+ */
+export function askText({ title = 'Rename', label = '', value = '', placeholder = '', confirm = 'Save', mono = true } = {}) {
+  return new Promise((resolve) => {
+    const host = $('#dialog-sheet');
+    if (!host) return resolve(null);
+    host.innerHTML = `
+      <div class="dialog-card" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
+        <h2 id="dialog-title">${escapeHtml(title)}</h2>
+        ${label ? `<label class="dialog-label" for="dialog-input">${escapeHtml(label)}</label>` : ''}
+        <input id="dialog-input" class="${mono ? 'mono' : ''}" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}" autocomplete="off" spellcheck="false">
+        <div class="dialog-actions">
+          <button class="btn" data-dialog-cancel>Cancel</button>
+          <button class="btn primary" data-dialog-ok>${escapeHtml(confirm)}</button>
+        </div>
+      </div>`;
+    host.hidden = false;
+    const input = $('#dialog-input', host);
+    setTimeout(() => {
+      input.focus();
+      const dot = input.value.lastIndexOf('.');
+      input.setSelectionRange(0, dot > 0 ? dot : input.value.length);
+    }, 10);
+    const done = (result) => {
+      host.hidden = true;
+      host.innerHTML = '';
+      document.removeEventListener('keydown', onKey, true);
+      host.onclick = null;
+      resolve(result);
+    };
+    const submit = () => done(input.value.trim() || null);
+    const onKey = (event) => {
+      if (event.key === 'Escape') {
+        event.stopPropagation();
+        done(null);
+      } else if (event.key === 'Enter') {
+        event.preventDefault();
+        submit();
+      }
+    };
+    document.addEventListener('keydown', onKey, true);
+    host.onclick = (event) => {
+      if (event.target === host) done(null);
+    };
+    $('[data-dialog-cancel]', host).onclick = () => done(null);
+    $('[data-dialog-ok]', host).onclick = submit;
+  });
+}
+
+export function askConfirm({ title = 'Are you sure?', body = '', confirm = 'Confirm', danger = false } = {}) {
+  return new Promise((resolve) => {
+    const host = $('#dialog-sheet');
+    if (!host) return resolve(false);
+    host.innerHTML = `
+      <div class="dialog-card" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
+        <h2 id="dialog-title">${escapeHtml(title)}</h2>
+        ${body ? `<p class="dialog-body">${escapeHtml(body)}</p>` : ''}
+        <div class="dialog-actions">
+          <button class="btn" data-dialog-cancel>Cancel</button>
+          <button class="btn ${danger ? 'danger' : 'primary'}" data-dialog-ok>${escapeHtml(confirm)}</button>
+        </div>
+      </div>`;
+    host.hidden = false;
+    const ok = $('[data-dialog-ok]', host);
+    setTimeout(() => ok.focus(), 10);
+    const done = (result) => {
+      host.hidden = true;
+      host.innerHTML = '';
+      document.removeEventListener('keydown', onKey, true);
+      host.onclick = null;
+      resolve(result);
+    };
+    const onKey = (event) => {
+      if (event.key === 'Escape') {
+        event.stopPropagation();
+        done(false);
+      } else if (event.key === 'Enter') {
+        event.preventDefault();
+        done(true);
+      }
+    };
+    document.addEventListener('keydown', onKey, true);
+    host.onclick = (event) => {
+      if (event.target === host) done(false);
+    };
+    $('[data-dialog-cancel]', host).onclick = () => done(false);
+    ok.onclick = () => done(true);
+  });
+}

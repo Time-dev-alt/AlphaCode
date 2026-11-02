@@ -332,15 +332,32 @@ test('model ids are remapped per provider and the catalogue is free-only', () =>
 });
 
 test('demo provider streams text and emits tool calls in the harness shape', async () => {
-  const events = [];
-  const result = await demoCompletion({
+  const stepEvents = [];
+  const step = await demoCompletion({
     messages: [{ role: 'user', content: 'build a page' }],
     tools: [{ type: 'function', function: { name: 'todo_write' } }],
-    onEvent: (e) => events.push(e),
+    onEvent: (e) => stepEvents.push(e),
   });
-  assert.ok(result.toolCalls.length === 1);
-  assert.equal(result.toolCalls[0].name, 'todo_write');
-  assert.ok(events.some((e) => e.type === 'text'));
+  assert.ok(step.toolCalls.length === 1);
+  assert.equal(step.toolCalls[0].name, 'todo_write');
+  // Tool steps stay quiet: the activity timeline reports them, and narrating
+  // each one in prose split the final answer into unreadable fragments.
+  assert.equal(stepEvents.filter((e) => e.type === 'text').length, 0);
+
+  // The closing answer is the thing that streams.
+  const answerEvents = [];
+  const history = [
+    { role: 'user', content: 'build a page' },
+    ...['todo_write', 'write', 'bash', 'write'].map((name) => ({ role: 'tool', content: name })),
+  ];
+  const answer = await demoCompletion({
+    messages: history,
+    tools: [{ type: 'function', function: { name: 'write' } }],
+    onEvent: (e) => answerEvents.push(e),
+  });
+  assert.equal(answer.toolCalls.length, 0);
+  assert.ok(answerEvents.some((e) => e.type === 'text'));
+  assert.match(answerEvents.map((e) => e.text || '').join(''), /landing page/);
 });
 
 /* ------------------------------------------------------------------ tools --- */

@@ -152,6 +152,7 @@ export class RequestGovernor {
    */
   constructor({
     budget = 24,
+    hardCap = 24,
     maxPerWindow = 10,
     maxPerWindowByok = 40,
     windowMs = 60_000,
@@ -170,6 +171,10 @@ export class RequestGovernor {
       }, { once: true });
     }));
     this.budget = budget;
+    // A turn may borrow against the hard cap (see `extend`): the per-turn number
+    // is a checkpoint, not a wall, and the rate window is what actually protects
+    // the provider.
+    this.hardCap = hardCap;
     this.maxPerWindow = maxPerWindow;
     this.maxPerWindowByok = maxPerWindowByok;
     this.windowMs = windowMs;
@@ -193,6 +198,35 @@ export class RequestGovernor {
   /** Requests left in this turn. */
   get remaining() {
     return Math.max(0, this.budget - this.used);
+  }
+
+  /**
+   * Requests left before the hard cap.
+   *
+   * Measured against whichever is further along — requests actually spent, or
+   * budget already granted — so repeated extensions cannot creep past the cap.
+   */
+  get headroom() {
+    return Math.max(0, this.hardCap - Math.max(this.used, this.budget));
+  }
+
+  /**
+   * Give a turn that is still making progress more room — up to the hard cap.
+   *
+   * The point of the per-turn budget is to stop runaway loops, not to stop an
+   * agent mid-build. If the turn is advancing (it ran tools and asked for more),
+   * borrowing another segment is correct *provided* the rate window still has
+   * capacity; `reserve()` enforces that on every request anyway.
+   *
+   * @param {number} [step] requests to add
+   * @returns {number} how many were actually granted (0 when the cap is reached)
+   */
+  extend(step = 8) {
+    const granted = Math.min(step, this.headroom);
+    if (granted <= 0) return 0;
+    this.budget += granted;
+    this.stats.extensions = (this.stats.extensions || 0) + 1;
+    return granted;
   }
 
   /** ms until this provider is usable again (0 = now). */
@@ -321,8 +355,10 @@ export class RequestGovernor {
       .filter((row) => row.cooldownMs > 0 || row.window > 0);
     return {
       budget: this.budget,
+      hardCap: this.hardCap,
       used: this.used,
       remaining: this.remaining,
+      headroom: this.headroom,
       sticky: this.sticky,
       providers,
       ...this.stats,

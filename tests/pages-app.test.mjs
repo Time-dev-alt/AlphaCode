@@ -184,23 +184,31 @@ test('the preview is rebuilt from project files with the picker and error hooks'
   assert.match(window.document.querySelector('#prompt').value, /Fix the code/);
 });
 
-test('choosing a template reuses the empty project and starts a build', { skip }, async () => {
+test('a template writes a finished app instantly, with no model request', { skip }, async () => {
   const { window } = ctx;
   const app = window.__alphacode;
   const before = app.state.projects.length;
   window.document.querySelector('#btn-templates').click();
   assert.equal(window.document.querySelector('#template-sheet').hidden, false);
 
+  const callsBefore = app.state.lastUsage?.calls || 0;
   const landing = [...window.document.querySelectorAll('.template')].find((card) => /Landing/.test(card.textContent));
   landing.click();
-  await wait(1200);
+  await wait(400);
 
   assert.equal(window.document.querySelector('#template-sheet').hidden, true, 'picker closes');
   assert.ok(app.state.projects.length <= before + 1, 'at most one project was created');
-  assert.match(app.state.project.name, /Landing/);
-  assert.match(window.document.querySelector('#prompt').value + window.document.querySelector('#transcript-inner').textContent, /Nimbus/, 'the starter prompt was sent');
-  const files = await app.state.fs.list(app.state.project.id);
-  assert.ok(files.some((f) => f.path.endsWith('.html')), 'the template produced files');
+  const files = (await app.state.fs.list(app.state.project.id)).map((f) => f.path).sort();
+  // Array.from: the app's arrays come from the jsdom realm, so a strict deep
+  // comparison would fail on the prototype rather than the contents.
+  assert.deepEqual(Array.from(files), ['app.js', 'index.html', 'style.css'], 'a complete app, not a stub');
+  const html = await app.state.fs.readText(app.state.project.id, 'index.html');
+  assert.match(html, /<h1>/, 'real markup');
+  assert.match(html, /pricing/i, 'the landing page has its sections');
+  const css = await app.state.fs.readText(app.state.project.id, 'style.css');
+  assert.ok(css.length > 3000, 'and real styling');
+  assert.equal(app.state.lastUsage?.calls || 0, callsBefore, 'zero model requests were spent');
+  assert.equal(app.state.running, false, 'nothing was sent to the model');
 });
 
 test('a checkpoint can be taken and restored from the history drawer', { skip }, async () => {
@@ -351,6 +359,10 @@ test('the agent fixes a broken preview on its own, once', { skip }, async () => 
   await app.send('make the hero bigger');
   assert.ok(app.state.harness.filesChanged.size > 0, 'the turn wrote files');
 
+  // Let the post-turn preview rebuild settle first: it installs a fresh
+  // document and clears the old error list, exactly like a page reload would.
+  await wait(350);
+
   // The preview reports a real runtime error as it boots after the reload —
   // exactly what the iframe does in a browser.
   window.dispatchEvent(
@@ -374,4 +386,56 @@ test('the agent fixes a broken preview on its own, once', { skip }, async () => 
   const later = (await app.state.store.messages(app.state.thread.id)).filter((m) => m.role === 'user').length;
   assert.equal(later, userMessages, 'no second fix pass for the same error');
   app.state.settings.autoVerify = false;
+});
+
+test('every view maps to a phone pane that can actually show it', { skip }, async () => {
+  const { window } = ctx;
+  const app = window.__alphacode;
+  const doc = window.document;
+  doc.querySelector('#app').dataset.mobilePane = 'preview';
+
+  // The bug: Deploy and the database live in the work column, so switching to
+  // them while the preview was in front left a blank screen.
+  for (const [view, pane] of [
+    ['deploy', 'chat'],
+    ['db', 'files'],
+    ['files', 'files'],
+    ['terminal', 'terminal'],
+    ['chat', 'chat'],
+  ]) {
+    app.setView(view);
+    await wait(80);
+    assert.equal(doc.querySelector('#app').dataset.mobilePane, pane, `${view} → ${pane} pane`);
+    assert.equal(doc.querySelector('#mobile-nav .mnav-item.active')?.dataset.pane, pane, 'the bottom bar agrees');
+    assert.equal(app.state.view, view, `${view} was not hijacked by the pane sync`);
+  }
+
+  // Choosing the preview pane must not rewrite the view, or coming back loses
+  // whatever the person was doing.
+  app.state.view = 'chat';
+  doc.querySelector('[data-pane="preview"]').click();
+  await wait(80);
+  assert.equal(doc.querySelector('#app').dataset.mobilePane, 'preview');
+  assert.equal(app.state.view, 'chat', 'the work column keeps its view');
+
+  // Tapping a work pane brings that view back.
+  doc.querySelector('[data-pane="files"]').click();
+  await wait(80);
+  assert.equal(app.state.view, 'files');
+  assert.equal(doc.querySelector('#app').dataset.mobilePane, 'files');
+});
+
+test('the phone preview pane is in the same grid row as the work column', { skip }, async () => {
+  const { window } = ctx;
+  const doc = window.document;
+  const app = doc.querySelector('#app');
+  app.dataset.mobilePane = 'preview';
+  // jsdom does not run media queries, so this asserts the markup contract the
+  // CSS keys off: the pane exists, is addressable, and the frame is present.
+  const pane = doc.querySelector('#preview-col');
+  const frame = doc.querySelector('#preview-frame');
+  assert.ok(pane, 'preview pane exists');
+  assert.ok(frame, 'preview frame exists');
+  assert.equal(doc.querySelectorAll('#preview-stage').length, 1);
+  app.dataset.mobilePane = 'chat';
 });

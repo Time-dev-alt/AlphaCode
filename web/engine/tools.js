@@ -7,6 +7,7 @@
  */
 import { openDatabase, saveDatabase, dbFiles, isReadOnlySql } from './db.js';
 import { isBinaryPath, normPath } from './fs.js';
+import { renderScaffold, SCAFFOLDS, SCAFFOLD_IDS } from './agent/scaffolds.js';
 
 const MAX_TOOL_OUTPUT = 24_000;
 const truncate = (text, limit = MAX_TOOL_OUTPUT) =>
@@ -114,6 +115,117 @@ export function buildTools(ctx) {
           lines: slice.length,
           total: lines.length,
         });
+      },
+    },
+    {
+      name: 'read_many',
+      description:
+        'Read several files in ONE call. Prefer this over repeated single reads: it is one request instead of five.',
+      schema: {
+        type: 'object',
+        properties: {
+          paths: { type: 'array', items: { type: 'string' }, description: 'File paths, in the order you want them back.' },
+          limit: { type: 'number', description: 'Lines per file (default 1200).' },
+        },
+        required: ['paths'],
+      },
+      readOnly: true,
+      async run({ paths = [], limit = 1200 }) {
+        const files = paths.slice(0, 20);
+        const parts = [];
+        let bytes = 0;
+        for (const raw of files) {
+          const path = normPath(raw);
+          if (isBinaryPath(path)) {
+            parts.push(`### ${path}\n[binary file skipped]`);
+            continue;
+          }
+          if (!(await fs.exists(projectId, path))) {
+            parts.push(`### ${path}\n[not found — it does not exist yet]`);
+            continue;
+          }
+          const text = await fs.readText(projectId, path).catch(() => '');
+          const lines = text.split('\n');
+          bytes += text.length;
+          // A shared budget keeps one huge file from crowding out the others.
+          const room = Math.max(80, Math.floor(4000 / Math.max(1, files.length)));
+          const shown = lines.slice(0, Math.min(Number(limit), room));
+          const more = lines.length > shown.length ? `\n… [${lines.length - shown.length} more lines]` : '';
+          parts.push(`### ${path} (${lines.length} lines)\n${shown.map((line, i) => `${String(i + 1).padStart(5)}→${line}`).join('\n')}${more}`);
+        }
+        return ok(parts.join('\n\n'), { kind: 'read-many', count: files.length, bytes });
+      },
+    },
+    {
+      name: 'write_many',
+      description:
+        'Create or overwrite several files in ONE call. Use this whenever a task touches more than one file — it is one request instead of one per file.',
+      schema: {
+        type: 'object',
+        properties: {
+          files: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { file_path: { type: 'string' }, content: { type: 'string' } },
+              required: ['file_path', 'content'],
+            },
+          },
+        },
+        required: ['files'],
+      },
+      mutating: true,
+      async run({ files = [] }) {
+        const written = [];
+        for (const entry of files.slice(0, 40)) {
+          if (!entry?.file_path) continue;
+          const path = normPath(entry.file_path);
+          const existed = await fs.exists(projectId, path);
+          const before = existed ? await fs.readText(projectId, path).catch(() => '') : '';
+          await fs.write(projectId, path, entry.content ?? '');
+          if (path.endsWith('.sqlite') || path.endsWith('.db')) releaseDb(path);
+          written.push({ path, existed, bytes: (entry.content || '').length, diff: unifiedDiff(before, entry.content ?? '', path) });
+        }
+        return ok(
+          written.map((f) => `${f.existed ? 'Updated' : 'Created'} ${f.path} (${f.bytes} bytes)`).join('\n'),
+          { kind: 'diff-many', files: written.map((f) => ({ path: f.path, diff: f.diff, created: !f.existed })) },
+        );
+      },
+    },
+    {
+      name: 'scaffold',
+      description:
+        'Write a complete, working starter app in one call, costing no output tokens. Use it to start a new project (or a new section of one), then edit the files it creates to match the request. Available: ' +
+        SCAFFOLD_IDS.join(', ') +
+        '.',
+      schema: {
+        type: 'object',
+        properties: {
+          kind: { type: 'string', enum: SCAFFOLD_IDS },
+          brand: { type: 'string', description: 'Product name to substitute into the markup.' },
+          dir: { type: 'string', description: 'Optional subdirectory, e.g. "docs".' },
+        },
+        required: ['kind'],
+      },
+      mutating: true,
+      async run({ kind, brand = '', dir = '' }) {
+        let rendered;
+        try {
+          rendered = renderScaffold(kind, { brand });
+        } catch (e) {
+          return err(e.message);
+        }
+        const prefix = dir ? `${normPath(dir)}/` : '';
+        const written = [];
+        for (const [name, content] of Object.entries(rendered.files)) {
+          const path = normPath(`${prefix}${name}`);
+          await fs.write(projectId, path, content);
+          written.push(path);
+        }
+        return ok(
+          `Scaffolded ${SCAFFOLDS[kind].name} → ${written.join(', ')} (${rendered.lines} lines). It already works — ${rendered.blurb} Read what you need, then change only what the request asks for.`,
+          { kind: 'scaffold', files: written, label: SCAFFOLDS[kind].name },
+        );
       },
     },
     {
@@ -510,7 +622,7 @@ Use job_output %${job.id} to read the log, job_kill %${job.id} to stop it.`, { k
   return tools;
 }
 
-const READ_ONLY_TOOLS = new Set(['read', 'glob', 'grep', 'ls', 'web_fetch', 'job_output', 'db_list', 'db_schema', 'db_query', 'db_rows', 'runtime_info', 'todo_write', 'checkpoint', 'exit_plan_mode']);
+const READ_ONLY_TOOLS = new Set(['read', 'read_many', 'glob', 'grep', 'ls', 'web_fetch', 'job_output', 'db_list', 'db_schema', 'db_query', 'db_rows', 'runtime_info', 'todo_write', 'checkpoint', 'exit_plan_mode']);
 
 export function toolsForMode(tools, mode, subagentType) {
   let list = tools;
@@ -532,6 +644,12 @@ export function toolTitle(name, args = {}) {
     case 'edit':
     case 'multiedit':
       return args.file_path || '';
+    case 'read_many':
+      return `${(args.paths || []).length} files`;
+    case 'write_many':
+      return `${(args.files || []).length} files`;
+    case 'scaffold':
+      return args.kind || 'app';
     case 'bash':
       return args.command || '';
     case 'grep':
@@ -556,6 +674,14 @@ export function toolTitle(name, args = {}) {
 
 export async function summarize(tool, out) {
   const display = out?.display;
+  if (display?.kind === 'diff-many') {
+    const files = display.files || [];
+    const added = files.reduce((sum, f) => sum + (f.diff || '').split('\n').filter((l) => l.startsWith('+')).length, 0);
+    const removed = files.reduce((sum, f) => sum + (f.diff || '').split('\n').filter((l) => l.startsWith('-')).length, 0);
+    return `${files.length} files · +${added} −${removed}`;
+  }
+  if (display?.kind === 'scaffold') return `${display.label} · ${display.files.length} files`;
+  if (display?.kind === 'read-many') return `${display.count} files read`;
   if (display?.kind === 'diff') {
     const added = (display.diff || '').split('\n').filter((l) => l.startsWith('+')).length;
     const removed = (display.diff || '').split('\n').filter((l) => l.startsWith('-')).length;

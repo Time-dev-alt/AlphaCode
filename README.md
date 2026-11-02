@@ -98,6 +98,9 @@ grid with a consistent stroke. No icon font, no emoji, no mixing.
    for the preview to boot and, if it threw, fixes it in one follow-up pass
    without being asked. The drawer's *Fix with AI* button still exists for
    errors you want to deal with later.
+5. **It keeps going.** A turn that is making progress does not stop at its first
+   request budget — it borrows another segment, up to a hard cap, while the
+   rate-limit window still protects the provider. Stop it any time with Esc.
 5. **Rewind if you dislike it.** Every turn snapshots the project; the history
    drawer restores any checkpoint.
 6. **Publish.** Instant claimable preview, or push to your GitHub and import to
@@ -122,16 +125,20 @@ needed twelve requests never finished. v8 makes the request pattern deliberate:
 | **Cap the rate, not just the count** | A sliding per-provider window keeps a fast tool loop inside what the tier allows | `governor.reserve()` |
 | **Budget the turn** | 8 requests by default (configurable 4–16). The agent is told how many are left and stops cleanly, with a **Continue** button instead of a failed turn | `Harness.send` |
 | **Batch in the prompt** | The system prompt requires independent tool calls in *one* response, complete files in one `write`, no re-reads, no per-step verification | `web/engine/agent/prompt.js` |
+| **Plural tools** | `write_many` writes every file a task needs in one call (`read_many` does the same for reads), so a multi-file change is one round trip, not one per file | `web/engine/tools.js` |
+| **Instant scaffolds** | `scaffold` writes a complete, working landing page / dashboard / todo app / docs site — 300+ lines, zero output tokens, zero requests. The template gallery uses it too: picking a template now produces a finished app before the model is involved | `web/engine/agent/scaffolds.js` |
+| **Keep going while it is working** | A productive turn borrows another segment of requests (3 segments max, still gated by the sliding window) instead of stopping at the first checkpoint | `Harness.send` + `governor.extend()` |
 | **Run tools in parallel** | A batch of read-only calls goes out together; identical calls in one message are answered once | `Harness.executeToolCalls` |
 | **Rank the file list** | Files are ranked by the words in the request, recency and entry-point status instead of listing the first eighty | `prompt.rankFiles` |
 | **Remember cooldowns** | A provider parked for a bad key is still parked after a reload — only cooldowns are stored, never keys | `localStorage` |
 
 The result in this repo's own numbers: a five-file landing page is **two**
-requests, not six (`tests/efficiency.test.mjs`), and a runaway loop stops at the
-budget with a resumable turn instead of draining the allowance.
+requests, not six (`tests/efficiency.test.mjs`); a scaffolded template is **zero**;
+and a runaway loop still stops at the hard cap with a resumable turn instead of
+draining the allowance.
 
 ```bash
-npm test   # 184 tests, including the request-behaviour ones
+npm test   # 202 tests, including the request-behaviour ones
 ```
 
 If you want the gory detail — including the parity matrix against Lovable and

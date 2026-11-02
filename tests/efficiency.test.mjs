@@ -315,7 +315,13 @@ async function makeHarness({ script = [], settings = {} } = {}) {
   harness.governor = fakeGovernor({ budget: settings.requestBudget || 8, sleep: async () => {} }).governor;
   // Replace the single provider call with the scripted stub.
   harness.callModel = async function stub({ messages, tools }) {
-    // Mirror the real path: a metered request spends one unit of budget.
+    // Mirror the real path: when the segment's requests are gone the real
+    // callModel raises a `paused` error, which is what the loop extends from.
+    if (harness.governor.remaining <= 0) {
+      const paused = new Error('Paused after the segment budget.');
+      paused.paused = true;
+      throw paused;
+    }
     harness.governor.used += 1;
     harness.governor.stats.attempts += 1;
     calls.push({ messages: messages.length, toolCount: tools.length });
@@ -375,16 +381,30 @@ test('the same read twice in one message is answered once', async () => {
   assert.equal(ends.length, 2, 'both calls are answered, so the transcript stays valid');
 });
 
-test('the turn stops at the budget instead of hammering the provider', async () => {
+test('a productive turn extends past its first budget, up to the hard cap', async () => {
   // A model that always wants one more file: the classic runaway loop.
-  const script = Array.from({ length: 30 }, (_, i) => ({
+  const script = Array.from({ length: 40 }, (_, i) => ({
     toolCalls: [{ id: `w${i}`, name: 'write', arguments: JSON.stringify({ file_path: `f${i}.txt`, content: 'x' }) }],
   }));
   const { harness, calls, events } = await makeHarness({ script, settings: { requestBudget: 4 } });
   const result = await harness.send('Write forever');
-  assert.equal(calls.length, 4, `gave up after the budget (made ${calls.length})`);
+  // 4 per segment × 3 segments: it kept going instead of stopping at the first
+  // checkpoint, because the turn was making progress.
+  assert.ok(calls.length > 4, `it kept working past the first segment (${calls.length})`);
+  assert.ok(calls.length <= 12 + 2, `but the hard cap still stops it (${calls.length})`);
   assert.equal(result.finishReason, 'budget');
+  assert.ok(events.some((e) => e.type === 'budget_extended'), 'the extension is reported');
   assert.ok(events.some((e) => e.type === 'budget_exhausted'));
+});
+
+test('auto-continue off stops a turn at its first budget', async () => {
+  const script = Array.from({ length: 30 }, (_, i) => ({
+    toolCalls: [{ id: `w${i}`, name: 'write', arguments: JSON.stringify({ file_path: `g${i}.txt`, content: 'x' }) }],
+  }));
+  const { harness, calls } = await makeHarness({ script, settings: { requestBudget: 4, autoContinue: false } });
+  const result = await harness.send('Write forever');
+  assert.equal(calls.length, 4, `stopped at the budget (made ${calls.length})`);
+  assert.equal(result.finishReason, 'budget');
 });
 
 test('the budget note is attached where the model will read it', async () => {
@@ -564,4 +584,148 @@ test('the same error with a different line number counts as the same error', () 
 test('the activity line says what was fixed', () => {
   assert.match(verifySummary([{ message: 'a' }, { message: 'b' }]), /Caught 2 preview errors/);
   assert.match(verifySummary([]), /clean/);
+});
+
+/* ── multi-item tools: several operations per request ─────────────────── */
+
+const { buildTools } = await import('../web/engine/tools.js');
+const { renderScaffold, SCAFFOLDS, SCAFFOLD_IDS } = await import('../web/engine/agent/scaffolds.js');
+
+async function toolBox() {
+  const fsx = new FileSystem(new MemoryFs());
+  const store = new Store(new MemoryBackend());
+  const { project } = await store.createProject({ name: 'Tools' });
+  const shell = new Shell({ fs: fsx, projectId: project.id });
+  const tools = buildTools({
+    fs: fsx,
+    store,
+    projectId: project.id,
+    shell,
+    getDb: async () => ({}),
+    releaseDb: () => {},
+    emit: () => {},
+    confirm: async () => ({ approved: true }),
+    runtimeInfo: () => ({}),
+  });
+  const get = (name) => tools.find((t) => t.name === name);
+  return { fsx, project, get, tools };
+}
+
+test('write_many writes every file in one call and reports one changeset', async () => {
+  const { fsx, project, get } = await toolBox();
+  const out = await get('write_many').run({
+    files: [
+      { file_path: 'index.html', content: '<h1>hi</h1>' },
+      { file_path: 'style.css', content: 'body{}' },
+      { file_path: 'src/app.js', content: 'console.log(1)' },
+    ],
+  });
+  assert.equal(out.isError, undefined);
+  assert.equal(out.display.kind, 'diff-many');
+  assert.equal(out.display.files.length, 3);
+  for (const path of ['index.html', 'style.css', 'src/app.js']) {
+    assert.ok(await fsx.exists(project.id, path), `${path} written`);
+  }
+  assert.match(out.text, /Created index\.html/);
+});
+
+test('read_many reads several files in one call, with a shared budget', async () => {
+  const { fsx, project, get } = await toolBox();
+  await fsx.write(project.id, 'a.js', 'const a = 1;');
+  await fsx.write(project.id, 'b.js', 'const b = 2;');
+  const out = await get('read_many').run({ paths: ['a.js', 'b.js', 'missing.js'] });
+  assert.equal(out.display.kind, 'read-many');
+  assert.match(out.text, /### a\.js/);
+  assert.match(out.text, /const a = 1/);
+  assert.match(out.text, /### b\.js/);
+  assert.match(out.text, /not found/, 'a missing file is reported, not fatal');
+  assert.ok(out.text.length < 12_000, 'the shared budget keeps the result small');
+});
+
+test('scaffold writes a complete working app for zero output tokens', async () => {
+  const { fsx, project, get } = await toolBox();
+  const out = await get('scaffold').run({ kind: 'landing', brand: 'Kestrel' });
+  assert.equal(out.display.kind, 'scaffold');
+  assert.deepEqual(Array.from(out.display.files), ['index.html', 'style.css', 'app.js']);
+  const html = await fsx.readText(project.id, 'index.html');
+  const css = await fsx.readText(project.id, 'style.css');
+  const js = await fsx.readText(project.id, 'app.js');
+  assert.match(html, /<h1>/, 'real markup');
+  assert.match(html, /Kestrel/, 'the brand is applied');
+  assert.ok(css.length > 2000, 'real styling');
+  assert.match(js, /addEventListener/, 'real behaviour');
+  // Everything is self-contained: no network at runtime.
+  assert.ok(!/<script[^>]+src="http/i.test(html), 'no CDN scripts');
+  assert.ok(!/@import\s+url\(/i.test(css), 'no remote fonts');
+});
+
+test('every scaffold is complete, responsive and offline', () => {
+  for (const id of SCAFFOLD_IDS) {
+    const { files } = renderScaffold(id);
+    assert.deepEqual(Object.keys(files).sort(), ['app.js', 'index.html', 'style.css'], `${id} has the full set`);
+    assert.match(files['index.html'], /<meta name="viewport"/, `${id} is responsive`);
+    assert.match(files['style.css'], /@media/, `${id} has breakpoints`);
+    assert.match(files['index.html'], /<title>/, `${id} has a title`);
+    assert.ok(files['app.js'].length > 400, `${id} has behaviour`);
+    assert.ok(SCAFFOLDS[id].blurb.length > 20);
+  }
+});
+
+test('an unknown scaffold fails with the list of real ones', async () => {
+  const { get } = await toolBox();
+  const out = await get('scaffold').run({ kind: 'kubernetes' });
+  assert.equal(out.isError, true);
+  assert.match(out.text, /landing/);
+});
+
+test('the new tools are read-only or mutating where they should be', async () => {
+  const { get } = await toolBox();
+  assert.equal(get('read_many').readOnly, true);
+  assert.equal(get('write_many').mutating, true);
+  assert.equal(get('scaffold').mutating, true);
+});
+
+test('a turn that writes with write_many marks every file as changed', async () => {
+  const { harness } = await makeHarness({
+    script: [
+      {
+        toolCalls: [
+          {
+            id: 'wm',
+            name: 'write_many',
+            arguments: JSON.stringify({
+              files: [
+                { file_path: 'index.html', content: '<h1>x</h1>' },
+                { file_path: 'style.css', content: 'h1{}' },
+              ],
+            }),
+          },
+        ],
+      },
+      { content: 'done' },
+    ],
+  });
+  await harness.send('build two files');
+  assert.deepEqual([...harness.filesChanged].sort(), ['index.html', 'style.css']);
+});
+
+/* ── autonomy: a turn that keeps going ────────────────────────────────── */
+
+test('a turn may borrow extra segments, but never past the hard cap', () => {
+  const { governor } = fakeGovernor({ budget: 4, hardCap: 10 });
+  assert.equal(governor.headroom, 6, 'room to grow from the current budget');
+  assert.equal(governor.extend(4), 4, 'the first borrow is granted');
+  assert.equal(governor.budget, 8);
+  assert.equal(governor.extend(4), 2, 'the second is clipped to the cap');
+  assert.equal(governor.budget, 10);
+  assert.equal(governor.extend(4), 0, 'and then it refuses');
+  assert.equal(governor.headroom, 0);
+});
+
+test('extending does not reset the rate window', async () => {
+  const { governor } = fakeGovernor({ budget: 2, hardCap: 20, maxPerWindow: 1, windowMs: 60_000, maxWaitMs: 0 });
+  assert.equal(await governor.reserve('kilo'), true);
+  governor.extend(2);
+  // More budget, but the provider's one-per-minute window is still closed.
+  assert.equal(await governor.reserve('kilo'), false, 'the window still protects the provider');
 });

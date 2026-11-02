@@ -445,6 +445,15 @@ export async function renderHistory() {
 
 /* -------------------------------------------------------------- templates -- */
 
+/**
+ * The gallery.
+ *
+ * `scaffold` names a starter app that is written **instantly, locally, in one
+ * tool call's worth of work and zero model requests** (`web/engine/agent/
+ * scaffolds.js`). A template without one falls back to sending its prompt.
+ * That difference is the whole point: picking "Landing page" used to cost a
+ * full turn, and now it costs nothing at all.
+ */
 export const TEMPLATES = [
   {
     id: 'blank',
@@ -458,6 +467,7 @@ export const TEMPLATES = [
     name: 'Landing page',
     description: 'Hero, features, pricing, footer. Great first project.',
     icon: 'spark',
+    scaffold: 'landing',
     prompt: 'Build a polished landing page for a SaaS product called "Nimbus". Include a hero with a gradient, three feature cards, a pricing section with three tiers, and a footer. Make it responsive and modern.',
   },
   {
@@ -465,6 +475,7 @@ export const TEMPLATES = [
     name: 'Dashboard',
     description: 'Sidebar, stat cards, a table and a chart placeholder.',
     icon: 'grid',
+    scaffold: 'dashboard',
     prompt: 'Build an admin dashboard with a sidebar, four stat cards with sparkline-style graphics, a recent-orders table with sample data, and a dark/light toggle. No external libraries.',
   },
   {
@@ -472,6 +483,7 @@ export const TEMPLATES = [
     name: 'Todo app',
     description: 'Add, complete and filter tasks; state persists in the browser.',
     icon: 'list',
+    scaffold: 'todo',
     prompt: 'Build a todo app with add, complete, delete, and filter (all/active/done). Persist to localStorage. Nice empty state and keyboard support.',
   },
   {
@@ -570,12 +582,31 @@ export async function pickAttachment() {
 
 /* -------------------------------------------------------------- mobile panes -- */
 
-const PANE_FOR_VIEW = { files: 'files', terminal: 'terminal', chat: 'chat', db: 'files', deploy: 'preview' };
-const VIEW_FOR_PANE = { chat: 'chat', files: 'files', terminal: 'terminal', preview: null };
+/**
+ * Which phone pane shows a given view.
+ *
+ * Two things are being kept apart here, and conflating them was the bug:
+ *
+ *   • a **pane** is what is visible on a phone (chat / files / terminal /
+ *     preview) — it is a layout concern;
+ *   • a **view** is what the work column renders (chat, files, terminal, db,
+ *     deploy) — it is a routing concern.
+ *
+ * Files, the database and Deploy all render in the work column, so they belong
+ * to a work pane; the preview is its own pane. When the two disagreed the
+ * symptom was a *blank screen*: switching to Deploy while the preview pane was
+ * in front left nothing visible at all.
+ */
+export const PANE_FOR_VIEW = { chat: 'chat', files: 'files', db: 'files', terminal: 'terminal', deploy: 'chat' };
 
-export function setMobilePane(pane) {
+export function paneForView(view) {
+  return PANE_FOR_VIEW[view] || 'chat';
+}
+
+/** Paint the pane without touching the view. Layout only. */
+function setPane(pane) {
   const app = $('#app');
-  if (!app) return;
+  if (!app) return 'chat';
   const next = ['chat', 'files', 'terminal', 'preview'].includes(pane) ? pane : 'chat';
   app.dataset.mobilePane = next;
   for (const button of $$('#mobile-nav .mnav-item')) {
@@ -583,21 +614,49 @@ export function setMobilePane(pane) {
     button.classList.toggle('active', active);
     button.setAttribute('aria-selected', String(active));
   }
-  if (next === 'preview') {
-    if (api.getState?.().view !== 'chat' && api.setView) api.setView('chat');
-    requestAnimationFrame(() => refreshPreview({ force: true }));
-  } else if (next === 'files') {
-    if (api.getState?.().view !== 'files') api.setView?.('files');
-  } else if (next === 'terminal') {
-    if (api.getState?.().view !== 'terminal') api.setView?.('terminal');
-    requestAnimationFrame(() => api.focusTerminal?.());
-  } else if (api.getState?.().view !== 'chat') {
-    api.setView?.('chat');
-  }
   // The dot means "the agent is working and you are not watching it".
   const badge = $('#mnav-badge');
   if (badge) badge.hidden = next === 'chat' || !api.getState?.().running;
+  return next;
+}
+
+/**
+ * Keep the pane showing whatever view was just selected.
+ *
+ * Called from `setView` — so a programmatic navigation (a palette command, a
+ * deep link, choosing Deploy in the menu) can never land on a pane that cannot
+ * show it. It never changes the view, which is what made the old round trip
+ * bounce back to chat.
+ */
+export function syncPaneToView(view) {
+  const pane = setPane(paneForView(view));
+  // Not forced: switching panes should not reload the app inside the frame and
+  // throw away its scroll position or form state.
+  if (pane === 'preview') requestAnimationFrame(() => refreshPreview());
+  return pane;
+}
+
+/** The bottom bar: an explicit choice of pane, which does drive the view. */
+export function setMobilePane(pane) {
+  const next = setPane(pane);
+  const view = api.getState?.().view;
+  if (next === 'preview') {
+    // The preview shows whatever the work column was showing when you come
+    // back, so the view is deliberately left alone.
+    requestAnimationFrame(() => refreshPreview());
+  } else if (next === 'files') {
+    if (view !== 'files' && view !== 'db') api.setView?.('files');
+  } else if (next === 'terminal') {
+    if (view !== 'terminal') api.setView?.('terminal');
+    requestAnimationFrame(() => api.focusTerminal?.());
+  } else if (view !== 'chat' && view !== 'deploy') {
+    // Chat means the conversation; Deploy is a work-column screen the user
+    // deliberately opened, and yanking them away from it is the same class of
+    // bug in reverse.
+    api.setView?.('chat');
+  }
   api.saveSettings?.({ mobilePane: next });
+  return next;
 }
 
 export function currentMobilePane() {
@@ -628,7 +687,8 @@ function bindMobilePanes() {
   $('#sidebar').addEventListener('click', (event) => {
     if (event.target.closest('button, a') && window.innerWidth <= 820) setTimeout(closeMenu, 120);
   });
-  if (api.getState?.().settings?.mobilePane) setMobilePane(api.getState().settings.mobilePane);
+  // Restore the last pane, but never onto a pane that cannot show the view.
+  syncPaneToView(api.getState?.().view || 'chat');
 }
 
 /* ------------------------------------------------------------------ jobs --- */

@@ -1,10 +1,27 @@
 {
-  // Workers Static Assets deployment of the client-side build.
-  // The recommended path is Cloudflare **Pages** + Git (see docs/DEPLOY.md);
-  // this file lets `wrangler deploy` publish the same dist/ as a Worker.
+  // Workers + static assets deployment of the client-side build.
+  //
+  // The recommended path is still Cloudflare **Pages** + Git (see
+  // docs/DEPLOY.md): Pages serves `functions/` with no extra config. This file
+  // exists so the same `dist/` can also ship as a Worker, and so a Workers
+  // Builds project can deploy from a clean checkout.
+  //
+  // Two things matter for CI, and both used to be wrong:
+  //
+  //  1. `build.command` — `dist/` is generated and git-ignored, so a clean
+  //     checkout has no assets directory and `wrangler deploy` fails with
+  //     "the directory specified by assets.directory does not exist". Wrangler
+  //     runs this command before it packages the Worker.
+  //  2. the deploy command — Workers Builds must run `npx wrangler deploy`.
+  //     `npx wrangler preview` is an **open-beta** command (wrangler itself
+  //     prints that warning) and is not a deploy: it produces a preview
+  //     deployment that expires, so a build configured with it never goes live.
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "alphacode",
   "compatibility_date": "2025-09-01",
+  "build": {
+    "command": "npm run build"
+  },
   "assets": {
     "directory": "dist",
     "not_found_handling": "single-page-application"

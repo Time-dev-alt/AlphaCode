@@ -243,3 +243,80 @@ export async function deployProject({
     display: { provider, url, repo: published.repo, repoUrl: published.url, files: Object.keys(safeFiles).length, claimable: false },
   };
 }
+
+/* ------------------------------------------------------------- preflight --- */
+
+/**
+ * Check a project can actually ship *before* opening a provider flow.
+ *
+ * The old path asked for the GitHub token, opened a tab and only then discovered
+ * the entry point was `home.html`, or that `styles.css` was never written, or
+ * that the token had expired. A failure at the last step of a five-step flow is
+ * the most expensive kind, so everything that can be known locally is known
+ * here, and it is split into blockers (cannot ship) and warnings (will ship,
+ * probably not what you meant).
+ *
+ * @param {object} options
+ * @param {string} options.target   a key of DEPLOY_TARGETS
+ * @param {Record<string,string>} options.files
+ * @param {{token?:string, login?:string}|null} [options.github]
+ * @returns {{ok:boolean, target:string, blockers:Array, warnings:Array, entry:string, bytes:number}}
+ */
+export function deployPreflight({ target = 'preview', files = {}, github = null } = {}) {
+  const blockers = [];
+  const warnings = [];
+  const block = (code, message, fix) => blockers.push({ code, message, fix });
+  const warn = (code, message, fix) => warnings.push({ code, message, fix });
+
+  const paths = Object.keys(files);
+  const htmlFiles = paths.filter((path) => /\.html?$/i.test(path));
+  const entry = paths.includes('index.html')
+    ? 'index.html'
+    : htmlFiles.find((path) => /(^|\/)index\.html?$/i.test(path)) || htmlFiles[0] || '';
+
+  if (!paths.length) block('empty-project', 'This project has no files yet.', 'Ask for something to be built first, or start from a template.');
+  else if (!entry) block('missing-entry', 'The project has no HTML entry point, so there is nothing to serve.', 'Add an index.html (a framework build output works too).');
+  else if (!paths.includes('index.html')) warn('entry-not-index', `Hosts serve index.html by default; this project's entry is ${entry}.`, 'Rename it to index.html so the site opens at the root URL.');
+
+  if (target && !DEPLOY_TARGETS[target]) warn('unknown-target', `Unknown deploy target “${target}”.`, 'Pick Cloudflare, Vercel, Netlify or Instant preview.');
+
+  // A deploy without a connected GitHub account cannot push a repo — that is the
+  // whole mechanism for the three hosts, so it is a blocker, not a nag.
+  if (target !== 'preview' && !github?.token) {
+    block('github-not-connected', 'Publishing to a host needs your GitHub account — the app pushes a repo to you rather than holding a deploy token.', 'Press “Connect GitHub”, then publish again.');
+  }
+
+  // Referenced-but-missing files are the classic "works locally, 404 in prod".
+  if (entry) {
+    const html = String(files[entry] || '');
+    const refs = [...html.matchAll(/(?:href|src)=["']([^"'#?:]+)["']/gi)].map((match) => match[1]).filter(Boolean);
+    const missing = [];
+    for (const ref of refs) {
+      if (/^\/\//.test(ref) || /^[a-z]+:/i.test(ref)) continue;
+      const clean = ref.replace(/^\.?\//, '').split('?')[0].split('#')[0];
+      if (!clean || clean.endsWith('/')) continue;
+      if (!(clean in files)) missing.push(clean);
+    }
+    if (missing.length) {
+      warn(
+        'missing-assets',
+        `${missing.length} file${missing.length === 1 ? '' : 's'} referenced by ${entry} are not in the project: ${missing.slice(0, 4).join(', ')}${missing.length > 4 ? '…' : ''}`,
+        'Write them, or remove the references — a deploy with a 404 stylesheet is not finished.',
+      );
+    }
+    if (!/<meta[^>]+name=["']viewport["']/i.test(html)) {
+      warn('no-viewport', 'No viewport meta tag — the site will be zoomed out on phones.', 'Add <meta name="viewport" content="width=device-width, initial-scale=1">.');
+    }
+  }
+
+  const bytes = Object.values(files).reduce((sum, value) => sum + (typeof value === 'string' ? value.length : 0), 0);
+  if (bytes > 12 * 1024 * 1024) {
+    warn('large-project', `The project is ${(bytes / 1024 / 1024).toFixed(1)} MB of text, which some hosts refuse in one upload.`, 'Move large assets to external storage or release them from the repo.');
+  }
+
+  if (target !== 'preview' && !paths.some((path) => /^readme\.md$/i.test(path))) {
+    warn('no-readme', 'No README, so the repo you publish will look empty on GitHub.', 'Optional — the app can write one for you.');
+  }
+
+  return { ok: blockers.length === 0, target, entry, bytes, blockers, warnings };
+}

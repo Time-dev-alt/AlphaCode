@@ -11,11 +11,13 @@ The browser edition gives up the things a tab genuinely cannot do (stdio
 subprocesses, `npm install`, PTY programs, server-side hooks) and keeps
 everything the agent loop needs. The table below is the browser edition.
 
-Weighted result: **91 %**, verified by `npm test` — 260+ tests, of which 51 drive
+Weighted result: **91 %**, verified by `npm test` — 291 tests, of which 51 drive
 request behaviour and edit precision (`tests/efficiency.test.mjs`), 33 drive the
 engine, 24 drive the runtimes (Node, npm, hooks, jobs, MCP, WASI, the in-tab
 compilers, WebContainers), 11 cover the same-origin LLM relay, 18 cover model
-discovery and boot the built bundle in jsdom.
+discovery, 12 cover deploy preflight and 13 cover the container cache, and 26
+boot the built bundle in jsdom (including the resume path, the incremental
+preview and the router-health chip).
 
 Request efficiency (v8) is scored under *Agentic loop*: a per-provider governor,
 `Retry-After` handling, sticky providers, a per-turn request budget and batching
